@@ -23,6 +23,7 @@ executable kiss-lisp
     -- other-extensions:
     build-depends:
       base ^>=4.21.0.0,
+      containers,
       streaming ^>=0.2,
       text >=2,
     hs-source-dirs:   app

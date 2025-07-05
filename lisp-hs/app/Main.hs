@@ -1,28 +1,43 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 module Main (main) where
 
+import Control.Monad (forM_)
+import Data.Bifunctor (second)
 import Data.Functor ((<&>))
 import Data.List.NonEmpty (NonEmpty)
+import Data.Map (Map)
 import Data.Text (Text)
+import Streaming (MonadIO(..))
 import Streaming.Prelude (Stream, Of(..))
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 
+import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Streaming as S
 import qualified Streaming.Prelude as S
 
 main :: IO ()
 main = do
-  S.print $ tokenize $ charSpans Nothing (Off 1 1) $ S.each "(a b (1 2 3) c)"
+  let src = "(call printLnInt (call add 2 5))\
+            \(call (call (fn (x) (fn (x) x)) 1) 2)" :: String
+  S.print $ tokenize $ charSpans Nothing (Off 1 1) $ S.each src
   putStrLn ""
-  printNodes $ goes $ tokenize $ charSpans Nothing (Off 1 1) $ S.each "(a b (1 2 3) c)"
+  printNodes $ reader $ tokenize $ charSpans Nothing (Off 1 1) $ S.each src
   putStrLn ""
-  (print =<<) $ blastme $ tokenize $ charSpans Nothing (Off 1 1) $ S.each "(a b (1 2 3) c)"
+  (ast :> ()) <- toConcreteSyntax $ reader $ tokenize $ charSpans Nothing (Off 1 1) $ S.each src
+  mapM_ print $ toUexpr <$> ast
+  putStrLn ""
+  forM_ ast $ \expr -> do
+    ueval u_startEnv (toUexpr expr) >>= print
 
 -----------------------
 ------ Locations ------
@@ -172,17 +187,17 @@ contSymbol c
   | 'a' <= c && c <= 'z' = True
   | 'A' <= c && c <= 'Z' = True
   | '0' <= c && c <= '9' = True
-  | c `elem` "_-" = True
+  | c `T.elem` "_-" = True
   | otherwise = False
 
 contDigits :: Char -> Bool
 contDigits c = '0' <= c && c <= '9'
 
 isWs :: Char -> Bool
-isWs = (`elem` " \t\n\r")
+isWs = (`T.elem` " \t\n\r")
 
 isNewline :: Char -> Bool
-isNewline = (`elem` "\n\r")
+isNewline = (`T.elem` "\n\r")
 
 isIllegal :: Char -> Bool
 isIllegal = (== StartIll) . startTokenType
@@ -205,43 +220,55 @@ data Atom
   | StrAtom StringToken
   deriving (Show)
 
+------ Errors ------
+
+class Monad m => ReaderError m where
+  extraCloseParen :: (PunctToken, Span) -- ^ token+location of open paren
+                  -> m a
+  missingCloseParen :: (PunctToken, Span) -- ^ token+location of open paren
+                    -> Maybe Token -- ^ token found instead
+                    -> m a
+
+instance ReaderError IO where
+  extraCloseParen (tok, l) =
+    die $ "extra close paren " <> show tok <> " at " <> show l
+  missingCloseParen (tok, l) m_found = do
+    let foundMsg = maybe "" (\tok2 -> "\n    found " <> show tok2) m_found
+    die $ "missing close paren, opened at " <> show tok <> " at " <> show l <> foundMsg
+
 ------ Algorithm ------
 
-goes :: Monad m => TokStream m r -> Stream (Node m) m r
-goes s = go s <&> \case
-  Left done -> done
-  Right (close@(Punctuation _ CloseParen), _) -> error $ "extra close paren: " <> show close
-  Right (other, _) -> error $ "internal error in goes? expecting close paren or end of stream, found: " <> show other
--- the idea is that `go` consumes the tokens to produce nodes, and terminates either
--- at the end of the tokens (Left result), or when an unmatched close paren is encountered (right)
-go :: Monad m => TokStream m r -> Stream (Node m) m (Either r (Token, TokStream m r))
-go s = S.effect $ S.next s <&> \case
-  Left done -> pure $ Left done
-  Right (tok, rest) -> case tok of
-    Punctuation open OpenParen -> S.wrap $ Tree open $ go rest <&> \case
-      Right (Punctuation close CloseParen, after) -> (close :> go after)
-      Left _ -> error $ "missing close paren"
-      Right (other, _) -> error $ "internal error in go? expecting close paren or end of stream, found: " <> show other
-    Punctuation _ CloseParen -> pure $ Right (tok, rest)
-    Symbol l txt -> S.wrap $ Leaf (SymAtom l txt) (go rest)
-    IntLit l n -> S.wrap $ Leaf (IntAtom l n) (go rest)
-    StrLit str -> S.wrap $ Leaf (StrAtom str) (go rest)
+reader :: ReaderError m => TokStream m r -> Stream (Node m) m r
+reader s0 = go s0 >>= \case
+  Left done -> pure done
+  Right (Punctuation l CloseParen, _) -> S.effect $ extraCloseParen (CloseParen, l)
+  Right (other, _) -> error $ "internal error in reader? expecting close paren or end of stream, found: " <> show other
+  where
+  -- the idea is that `go` consumes the tokens to produce nodes, and terminates either
+  -- at the end of the tokens (Left result), or when an unmatched close paren is encountered (right)
+  go :: ReaderError m => TokStream m r -> Stream (Node m) m (Either r (Token, TokStream m r))
+  go s = S.effect $ S.next s <&> \case
+    Left done -> pure $ Left done
+    Right (tok, rest) -> case tok of
+      Punctuation open OpenParen -> S.wrap $ Tree open $ go rest >>= \case
+        Right (Punctuation close CloseParen, after) -> pure (close :> go after)
+        Left _ -> S.effect $ missingCloseParen (OpenParen, open) Nothing
+        Right (other, _) -> error $ "internal error in reader? expecting close paren or end of stream, found: " <> show other
+      Punctuation _ CloseParen -> pure $ Right (tok, rest)
+      Symbol l txt -> S.wrap $ Leaf (SymAtom l txt) (go rest)
+      IntLit l n -> S.wrap $ Leaf (IntAtom l n) (go rest)
+      StrLit str -> S.wrap $ Leaf (StrAtom str) (go rest)
 
-huh :: Monad m => Stream (Node m) m r -> m (Of [Ast] r) -- DEBUG
-huh s = S.inspect s >>= \case
+toConcreteSyntax :: ReaderError m => Stream (Node m) m r -> m (Of [Ast] r) -- DEBUG
+toConcreteSyntax s = S.inspect s >>= \case
   Left done -> pure ([] :> done)
   Right (Leaf x rest) -> do
-    siblings :> done <- huh rest
+    siblings :> done <- toConcreteSyntax rest
     pure $ (Atom x : siblings) :> done
   Right (Tree open next) -> do
-    children :> (close :> rest) <- huh next
-    siblings :> done <- huh rest
+    children :> (close :> rest) <- toConcreteSyntax next
+    siblings :> done <- toConcreteSyntax rest
     pure $ (Combo open children close : siblings) :> done
-
-blastme :: Monad m => TokStream m () -> m [Ast]
-blastme s = do
-  (ast :> ()) <- huh (goes s)
-  pure ast
 
 ------ Tree Streaming ------
 
@@ -276,12 +303,114 @@ printNodes = loop ""
        S.liftIO $ putStrLn $ prefix <> "END Tree " <> show close
        loop prefix rest
 
--------------------------------
------- Streaming Helpers ------
--------------------------------
+---------------------
+------ Helpers ------
+---------------------
 
 -- DELME
 -- peek :: (Monad m) => Stream (Of a) m r -> m (Maybe a, Stream (Of a) m r)
 -- peek s = S.next s >>= pure . \case
 --   Left r -> (Nothing, pure r)
 --   Right (x, xs) -> (Just x, S.cons x xs)
+
+die :: MonadIO m => String -> m a
+die msg = liftIO $ hPutStrLn stderr msg >> exitFailure
+
+--------------------------
+------ Untyped Lisp ------
+--------------------------
+
+------ Language ------
+
+data U_Expr
+  = U_Var Text
+  | U_App U_Expr [U_Expr]
+  | U_Lam [Text] U_Expr
+  | U_Lit U_Lit
+  deriving (Show)
+
+data U_Lit
+  = U_Int Integer
+  | U_Str Text
+  deriving (Show)
+
+------ Parser ------
+
+toUexpr :: Ast -> U_Expr
+toUexpr (Atom (SymAtom _ x)) = U_Var x
+toUexpr (Atom (IntAtom _ i)) = U_Lit (U_Int i)
+toUexpr (Combo _ (Atom (SymAtom _ "call") : f : args) _) = U_App (toUexpr f) (toUexpr <$> args)
+toUexpr (Combo _ [Atom (SymAtom _ "fn"), (Combo _ params _), body] _) = U_Lam (toParam <$> params) (toUexpr body)
+  where
+  toParam (Atom (SymAtom _ x)) = x
+
+------ Values ------
+
+data U_Val m
+  = U_Fun (U_Fun m)
+  | U_Const U_Const
+  | U_Builtin ([U_Val m] -> m (U_Val m))
+
+data U_Const
+  = U_IntC Integer
+  | U_StrC Text
+  | U_UnitC
+  deriving (Show)
+
+instance Show (U_Val m) where
+  show (U_Fun _) = "<function>"
+  show (U_Const c) = show c
+  show (U_Builtin _) = "<builtin>"
+
+data U_Fun m = U_Function
+  { staticEnv :: Map Text (U_Val m)
+  , params :: [Text]
+  , body :: U_Expr
+  }
+  deriving (Show)
+
+------ Evaluator ------
+
+class MonadIO m => U_Eval m where -- TODO instead of taking in all of IO, sandbox it with the actual methods I need
+  u_unboundVariable :: Text -> m a
+
+instance U_Eval IO where
+  u_unboundVariable x = error $ "unbound variable " <> show x
+
+type U_Env m = Map Text (U_Val m)
+
+u_startEnv :: forall m. U_Eval m => Map Text (U_Val m)
+u_startEnv = Map.fromList $ second U_Builtin <$> builtins
+  where
+  builtins =
+    [ ("add", primAdd)
+    , ("printLnInt", primPrintIntLn)
+    ]
+  primAdd [U_Const (U_IntC x), U_Const (U_IntC y)] = pure $ U_Const $ U_IntC (x + y)
+  primPrintIntLn [U_Const (U_IntC i)] = do
+    liftIO (print i)
+    pure $ U_Const U_UnitC
+
+ueval :: U_Eval m => U_Env m -> U_Expr -> m (U_Val m)
+ueval env (U_Var x) = case Map.lookup x env of
+  Nothing -> u_unboundVariable x
+  Just v -> pure v
+ueval env (U_App getF getArgs) = do
+  f <- ueval env getF
+  args <- mapM (ueval env) getArgs
+  uapply f args
+ueval staticEnv (U_Lam params body) = pure $ U_Fun $ U_Function
+  { staticEnv
+  , params
+  , body
+  }
+ueval _ (U_Lit (U_Int i)) = pure $ U_Const (U_IntC i)
+ueval _ (U_Lit (U_Str str)) = pure $ U_Const (U_StrC str)
+
+uapply :: U_Eval m => U_Val m -> [U_Val m] -> m (U_Val m)
+uapply (U_Fun f) args | length args == length f.params = do
+  let callEnv = Map.fromList $ zip f.params args
+      env' = callEnv `Map.union` f.staticEnv
+  ueval env' f.body
+uapply (U_Builtin impl) args = impl args
+
