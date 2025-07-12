@@ -27,8 +27,9 @@ import qualified Streaming.Prelude as S
 
 main :: IO ()
 main = do
-  let src = "(call printLnInt (call add 2 5))\
-            \(call (call (fn (x) (fn (x) x)) 1) 2)" :: String
+  let src = "(call printLnInt (call add 2 5))\n\
+            \(call (call (fn (x) (fn (x) x)) 1) 2)\n\
+            \\"hello\"" :: String
   S.print $ tokenize $ charSpans Nothing (Off 1 1) $ S.each src
   putStrLn ""
   printNodes $ reader $ tokenize $ charSpans Nothing (Off 1 1) $ S.each src
@@ -103,6 +104,12 @@ data StringPart
   | Escape Text
   deriving (Show)
 
+strtok2text :: StringToken -> Text
+strtok2text tok = mconcat $ go <$> tok.insideStr
+  where
+  go (_, PlainStr str) = str
+  go (_, Escape str) = str
+
 data StrQuote = DblQuote | Backtick
   deriving (Eq, Show)
 
@@ -141,6 +148,22 @@ tokenize s = S.effect $ S.next s <&> \case
       -- TODO peek for a decimal point
       -- TODO peek for an exponent
       pure (Just $ IntLit l num, rest)
+    StartStr open -> do -- TODO string escapes, multiple string parts
+      let ini = (lx.end, [])
+          inc (_, revacc) (c, lc) = (lc.end, c:revacc)
+          fin (end', revacc) = (lx{end=end'}, PlainStr $ T.pack $ reverse revacc)
+      (strpart :> ys) <- S.fold inc ini fin $ S.break (\(c, _) -> c `T.elem` "\"`\n") xs
+      ((ly, close), rest) <- S.next ys >>= \case
+        Left _ -> error "unclosed str literal, found EOF"
+        Right ((y, ly), rest)
+          | StartStr close <- startTokenType y -> pure ((ly, close), rest)
+          | otherwise -> error $ "unclosed str literal, found " <> show y <> " at " <> show ly
+      let tok = StrToken
+            { openStr = (lx, open)
+            , insideStr = [strpart]
+            , closeStr = (ly, close)
+            }
+      pure (Just $ StrLit tok, rest)
     StartWs -> pure (Nothing, S.dropWhile (isWs . fst) xs)
     StartComment -> pure (Nothing, S.dropWhile (not . isNewline . fst) xs)
     StartIll -> pure (Nothing, S.dropWhile (isIllegal . fst) xs)
@@ -339,10 +362,15 @@ data U_Lit
 toUexpr :: Ast -> U_Expr
 toUexpr (Atom (SymAtom _ x)) = U_Var x
 toUexpr (Atom (IntAtom _ i)) = U_Lit (U_Int i)
+toUexpr (Atom (StrAtom tok)) = U_Lit (U_Str $ strtok2text tok)
+toUexpr (Combo _ [] _) = error "empty combination is not allowed"
+toUexpr (Combo _ [x] _) = toUexpr x
 toUexpr (Combo _ (Atom (SymAtom _ "call") : f : args) _) = U_App (toUexpr f) (toUexpr <$> args)
 toUexpr (Combo _ [Atom (SymAtom _ "fn"), (Combo _ params _), body] _) = U_Lam (toParam <$> params) (toUexpr body)
   where
   toParam (Atom (SymAtom _ x)) = x
+  toParam _ = error "expecting variable name as fn parameter"
+toUexpr (Combo _ (_:_) _) = error "combinations must start with a keyword (did you want `(call ...)`?)"
 
 ------ Values ------
 
@@ -387,9 +415,11 @@ u_startEnv = Map.fromList $ second U_Builtin <$> builtins
     , ("printLnInt", primPrintIntLn)
     ]
   primAdd [U_Const (U_IntC x), U_Const (U_IntC y)] = pure $ U_Const $ U_IntC (x + y)
+  primAdd _ = die "type error: `add` expects two integers"
   primPrintIntLn [U_Const (U_IntC i)] = do
     liftIO (print i)
     pure $ U_Const U_UnitC
+  primPrintIntLn _ = die "type error: `printIntLn` expects one integer"
 
 ueval :: U_Eval m => U_Env m -> U_Expr -> m (U_Val m)
 ueval env (U_Var x) = case Map.lookup x env of
@@ -408,9 +438,12 @@ ueval _ (U_Lit (U_Int i)) = pure $ U_Const (U_IntC i)
 ueval _ (U_Lit (U_Str str)) = pure $ U_Const (U_StrC str)
 
 uapply :: U_Eval m => U_Val m -> [U_Val m] -> m (U_Val m)
-uapply (U_Fun f) args | length args == length f.params = do
-  let callEnv = Map.fromList $ zip f.params args
-      env' = callEnv `Map.union` f.staticEnv
-  ueval env' f.body
+uapply (U_Fun f) args
+  | length args == length f.params = do
+    let callEnv = Map.fromList $ zip f.params args
+        env' = callEnv `Map.union` f.staticEnv
+    ueval env' f.body
+  | otherwise = die "type error: wrong number of arguments"
 uapply (U_Builtin impl) args = impl args
+uapply _ _ = die "type error: only gunctions are callable"
 
