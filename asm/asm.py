@@ -14,6 +14,66 @@ def main():
     # - [ ] TODO: parse and evaluate expressions (registering patch locations and exports)
     # - [ ] TODO: parse and stream a rewrite through the body of the binary
 
+# # File Format
+
+class Asm:
+    def __init__(self):
+        self.digit = None
+        self.wordbits = None
+        self.patterns = dict()
+        self.vars = dict()
+        self.words = []
+        self.patches = []
+
+def parse_file(fp):
+    acc = dict()
+    mode = parse_meta
+    for line in fp.readlines():
+        line = line.rstrip('\n\r')
+        mode = mode(acc, line)
+    return acc
+
+def parse_meta(acc, line):
+    if m := re.match(r'([a-zA-Z]):(.*)$', line):
+        k, v = m[1].lower(), m[2].strip()
+        if k == "digit":
+            if v == "hex":
+                acc.digit = 4 # four bits per digit
+            else:
+                raise Exception("unsupported base")
+        elif k == "wordbits":
+            acc.wordbits = int(v)
+        else:
+            raise Exception("unknown option")
+        return parse_meta
+    elif re.match(r'-{3,}$'):
+        return parse_defs
+    else:
+        raise Exception()
+
+def parse_defs(acc, line):
+    if m := re.match(r'([a-zA-Z]+):(.*)$', line):
+        name = m[1]
+        pat = parse_pattern(m[2])
+        acc.patterns[name] = {
+                "nbits": len(pat),
+                "indexes": pat,
+            }
+        return parse_defs
+    elif m := re.match(ID_REGEX_STR+r'\s+=\s+', line):
+        name = m[1]
+        expr = parse_expr(line[m.end():])
+        acc.vars[name] = expr
+        return parse_defs
+    elif re.match(r'-{3,}$'):
+        return parse_body
+    else:
+        raise Exception()
+
+def parse_body(acc, line):
+    # TODO
+    return None
+
 # # Expression Trees and Evaluation
 
 # We use expressions to calculate (non-negative) integers that will be patched into the binary payload.
@@ -43,9 +103,9 @@ def main():
 #    Note that function names must immediately preceed their argument list.
 NUM_REGEX = re.compile(r'\d+')
 ID_CLASS = r'a-zA-Z_.$@'
-ID_REGEX = f'[{ID_CLASS}][{ID_CLASS}0-9]*'
-FUNC_REGEX = re.compile(ID_REGEX + r'\(')
-ID_REGEX = re.compile(ID_REGEX)
+ID_REGEX_STR = f'[{ID_CLASS}][{ID_CLASS}0-9]*'
+ID_REGEX = re.compile(ID_REGEX_STR)
+FUNC_REGEX = re.compile(ID_REGEX_STR + r'\(')
 
 # This is a hand-written recursive decent parser.
 # Expressions are:
@@ -233,6 +293,57 @@ class ExprParens:
             return acc
         else:
             return self
+
+# # Formats
+
+# We don't assume any partiular ordering (or number) of bits when we patch a computed value into the binary.
+# In fact, for some formats (such as RISC-V S-type instructions), the bits are spread irregularly throughout the binary.
+# Formats give us a way to specify where to place each bit of a computed number across some number of bytes.
+
+# A format is stored internally as little more than a list of `None`s and integers.
+# An integer identifies the bit (zero-indexed, little-endian, so it agreres with the bit's power of two),
+# wheras a `None` specifies a padding bit.
+# The patch is performed by masking the non-padding value's bits with the bits present in the binary source.
+
+def patch(pattern, bits, value):
+    """Provide the `bits` as an iterable of bits (big-endian within a word, then from low-to-high address).
+    Then, give the value as just the integer.
+    This will return an iterable of patched bits (same order as the input bits).
+    The length of bits must be an integral number of the word size, and the number of words must match the pattern length.
+    """
+    bits = list(bits)
+    if len(bits) != pattern.nbits:
+        raise Exception("mismatched number of bits for the pattern")
+    for i in range(0, pattern.nbits):
+        if pattern.indexes[i] is None:
+            yield bits[i]
+        else:
+            yield (value >> i) & 1
+
+def parse_pattern(input):
+    input = input.lstrip()
+    acc = []
+    while input:
+        if m := re.match(r'X\*(\d+)', input):
+            acc += [None] * int(m[1])
+        elif m := re.match(r'X+', input):
+            acc += [None] * len(m[0])
+        elif m := re.match(r'(\d+)-(\d+)', input):
+            a, b = int(m[1]), int(m[2])
+            if a < b:
+                acc += list(range(a, b+1))
+            elif a > b:
+                acc += list(range(a, b-1, -1))
+            else:
+                acc += [a]
+        elif m := re.match(r'\d+', input):
+            acc += [int(m[0])]
+        else:
+            raise Exception(f"pattern syntax error: {input}")
+        input = input[m.end():].lstrip()
+    return acc
+
+
 
 # # Kickoff
 
