@@ -3,19 +3,20 @@ import re
 def main():
     # - [ ] TODO: parse cli arguments
     # For now, we're just going to jump to some experimental code
-    expr, rest = parse_expr("clamp(0, abs(0 - (42 + alpha - 2 * (11 - 2))), 1024)")
-    if rest:
-        print(repr(rest))
-    else:
-        print(expr.reduce({'alpha': 137}))
     file = """
     digit: hex
     wordbits: 8
+    defaultformat: le
     ---
-    le: 15-0
-    it = 2 * (2+3)
+    be: 15-0
+    le: 7-0 15-8
+    octet: 7-0
+    it = 2 * (2+3) + 3
     ---
-    5A5A here: { le; 0000; it + 256 } there: 5B5B
+    {2}
+    one: {two-one.start} one.start: 01 02 03 04 05
+    two: {end-two.start} two.start: 00 01 01 02 03 05 08 {octet; it}
+    end:
     """
     from io import StringIO
     with StringIO(file) as fp:
@@ -33,6 +34,7 @@ class Asm:
     def __init__(self):
         self.digit = None
         self.wordbits = None
+        self.defaultFormat = None
         self.formats = dict()
         self.exprs = dict()
         self.vars = dict()
@@ -81,7 +83,7 @@ class Asm:
 
     def patch(self):
         for patch in self.patches:
-            fmt = self.formats[patch['fmt']]
+            fmt = patch['fmt']
             val = patch['expr'].reduce(self.vars)
             if type(val) is ExprValue:
                 val = val.val
@@ -96,7 +98,6 @@ class Asm:
                     bits.append((word >> i) & 1)
             # call the bitwise patching function
             bits = list(patch_bits(fmt, bits, val))
-            print(bits)
             # TODO distribute the bits back
             for i in range(0, fmtwords):
                 word = 0
@@ -129,8 +130,10 @@ def parse_meta(acc, line):
                 raise Exception("unsupported base")
         elif k == "wordbits":
             acc.wordbits = int(v)
+        elif k == 'defaultformat':
+            acc.defaultformat = v.strip()
         else:
-            raise Exception("unknown option")
+            raise Exception(f"unknown option: {repr(k)}")
         return parse_meta
     elif re.match(r'-{3,}$', line):
         return parse_defs
@@ -169,9 +172,11 @@ def parse_body(acc, line):
         elif m := re.match(r'\{(.*?)\}', line):
             fmt, words, expr = parse_patch(acc, m[1])
             if fmt is None:
-                raise Exception("TODO: a default format")
+                fmt = acc.formats[acc.defaultformat]
+            else:
+                fmt = acc.formats[fmt]
             if words is None:
-                raise Exception("TODO: a default format")
+                words = fmt['nbits']//acc.wordbits * [0]
             acc.patches.append({
                 'off': len(acc.words),
                 'fmt': fmt,
@@ -182,6 +187,7 @@ def parse_body(acc, line):
         else:
             raise Exception()
         line = line[m.end():].lstrip()
+    return parse_body
 
 def parse_words(asm, line):
     acc = []
@@ -192,11 +198,11 @@ def parse_words(asm, line):
 def parse_patch(asm, input):
     parts = input.split(';')
     if len(parts) == 1:
-        expr = parse_expr(parts[2].lstrip())
+        expr = parse_expr(parts[0].lstrip())
         fmt = None
         words = None
     elif len(parts) == 2:
-        expr = parse_expr(parts[2].lstrip())
+        expr = parse_expr(parts[1].lstrip())
         fmt = parts[0].strip()
         words = None
     elif len(parts) == 3:
@@ -277,7 +283,7 @@ def parse_expr(expr):
             expr = rest.lstrip()
             if not expr or expr[0] != ')':
                 raise Exception()
-            expr = expr[1:]
+            expr = expr[1:].lstrip()
         # Here are operators.
         # `expr ::= <expr> ('+' | '-' | '*') <expr>`
         # This parser just expects that the input puts the operators in the right place.
@@ -311,6 +317,8 @@ def parse_expr(expr):
             tree, rest = it
             acc.append(tree)
             expr = rest.lstrip()
+        else:
+            raise Exception("syntax error: {repr(expr)}")
     if len(acc) == 0:
         raise Exception()
     elif len(acc) == 1:
@@ -456,10 +464,11 @@ def patch_bits(format, bits, value):
     if (nbits := len(bits)) != format['nbits']:
         raise Exception("mismatched number of bits for the format")
     for i in range(0, format['nbits']):
-        if format['indexes'][i] is None:
+        bitIndex = format['indexes'][i]
+        if bitIndex is None:
             yield bits[i]
         else:
-            yield (value >> (nbits-1 - i)) & 1
+            yield (value >> bitIndex) & 1
 
 def parse_format(input):
     input = input.lstrip()
