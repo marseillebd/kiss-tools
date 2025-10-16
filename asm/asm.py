@@ -1,17 +1,30 @@
 import re
 
 def main():
+    # - [ ] TODO: parse cli arguments
     # For now, we're just going to jump to some experimental code
     expr, rest = parse_expr("clamp(0, abs(0 - (42 + alpha - 2 * (11 - 2))), 1024)")
     if rest:
         print(repr(rest))
     else:
         print(expr.reduce({'alpha': 137}))
+    file = """
+    digit: hex
+    wordbits: 8
+    ---
+    le: 15-0
+    it = 2 * (2+3)
+    ---
+    5A5A here: { le; 0000; it + 256 } there: 5B5B
+    """
+    from io import StringIO
+    with StringIO(file) as fp:
+        asm = parse_file(fp)
+    asm.eval()
+    asm.patch()
+    print(repr(asm))
+    asm.print_words()
     return
-    # - [ ] TODO: parse arguments
-    print("hello")
-    # - [ ] TODO: parse file properties
-    # - [ ] TODO: parse and evaluate expressions (registering patch locations and exports)
     # - [ ] TODO: parse and stream a rewrite through the body of the binary
 
 # # File Format
@@ -20,21 +33,94 @@ class Asm:
     def __init__(self):
         self.digit = None
         self.wordbits = None
-        self.patterns = dict()
+        self.formats = dict()
+        self.exprs = dict()
         self.vars = dict()
         self.words = []
         self.patches = []
 
+    def finalize(self):
+        if self.digit is None:
+            raise Exception()
+        if self.wordbits is None:
+            raise Exception()
+        self.WORD_REGEX = [
+            None,
+            r'[01]', # binary
+            r'[0-3]', # quaternary?
+            r'[0-7]', # octal
+            r'[0-9A-F]', # hexadecimal
+        ][self.digit] + '{' + str(self.wordbits//self.digit) + '}'
+        self.WORD_REGEX = re.compile(self.WORD_REGEX)
+        if self.wordbits % 4 == 0:
+            self.wordstr = hex
+        elif self.wordbits % 3 == 0:
+            self.wordstr = oct
+        else:
+            raise Exception()
+
+    def __repr__(self):
+        return f"exprs: {self.exprs}\nvars: {self.vars}\nformats: {self.formats}\npatches: {self.patches}"
+
+    def eval(self):
+        progress = True
+        while progress:
+            if not self.exprs: break
+            progress = False
+            newExprs = dict()
+            for name, expr in self.exprs.items():
+                val = expr.reduce(self.vars)
+                if type(val) is ExprValue:
+                    self.vars[name] = val
+                    progress = True
+                else:
+                    newExprs[name] = val
+            self.exprs = newExprs
+        else:
+            raise Exception(f"cannot evaluate some expressions:\n{self.exprs}")
+
+    def patch(self):
+        for patch in self.patches:
+            fmt = self.formats[patch['fmt']]
+            val = patch['expr'].reduce(self.vars)
+            if type(val) is ExprValue:
+                val = val.val
+            else:
+                raise Excpetion(f"cannot evaluate patch expression: {val}")
+            # load the unpatched bits from the binary
+            bits = []
+            fmtwords = fmt['nbits']//self.wordbits
+            for i in range(0, fmtwords):
+                word = self.words[patch['off'] + i]
+                for j in range(self.wordbits-1, -1, -1):
+                    bits.append((word >> i) & 1)
+            # call the bitwise patching function
+            bits = list(patch_bits(fmt, bits, val))
+            print(bits)
+            # TODO distribute the bits back
+            for i in range(0, fmtwords):
+                word = 0
+                for j in range(0, self.wordbits):
+                    word = (word << 1) + bits[i*self.wordbits + j]
+                self.words[patch['off'] + i] = word
+
+    def print_words(self):
+        # TODO eval exprs and insert patches
+        for word in self.words:
+            print(self.wordstr(word))
+
 def parse_file(fp):
-    acc = dict()
+    acc = Asm()
     mode = parse_meta
     for line in fp.readlines():
         line = line.rstrip('\n\r')
+        line = line.lstrip()
+        if not line: continue
         mode = mode(acc, line)
     return acc
 
 def parse_meta(acc, line):
-    if m := re.match(r'([a-zA-Z]):(.*)$', line):
+    if m := re.match(r'([a-zA-Z]+):(.*)$', line):
         k, v = m[1].lower(), m[2].strip()
         if k == "digit":
             if v == "hex":
@@ -46,33 +132,90 @@ def parse_meta(acc, line):
         else:
             raise Exception("unknown option")
         return parse_meta
-    elif re.match(r'-{3,}$'):
+    elif re.match(r'-{3,}$', line):
         return parse_defs
     else:
-        raise Exception()
+        raise Exception(f"syntax error {repr(line)}")
 
 def parse_defs(acc, line):
     if m := re.match(r'([a-zA-Z]+):(.*)$', line):
         name = m[1]
-        pat = parse_pattern(m[2])
-        acc.patterns[name] = {
-                "nbits": len(pat),
-                "indexes": pat,
+        fmt = parse_format(m[2])
+        acc.formats[name] = {
+                "nbits": len(fmt),
+                "indexes": fmt,
             }
         return parse_defs
-    elif m := re.match(ID_REGEX_STR+r'\s+=\s+', line):
+    elif m := re.match(r'('+ID_REGEX_STR+r')'+r'\s+=\s+', line):
         name = m[1]
-        expr = parse_expr(line[m.end():])
-        acc.vars[name] = expr
+        expr, rest = parse_expr(line[m.end():])
+        if rest: raise Exception(f"syntax error: {rest}")
+        acc.exprs[name] = expr
         return parse_defs
-    elif re.match(r'-{3,}$'):
+    elif re.match(r'-{3,}$', line):
+        acc.finalize()
         return parse_body
     else:
         raise Exception()
 
 def parse_body(acc, line):
-    # TODO
-    return None
+    line = line.lstrip()
+    while line:
+        if m := re.match(r'('+ID_REGEX_STR+r'):', line):
+            acc.vars[m[1]] = len(acc.words)
+        elif m := acc.WORD_REGEX.match(line):
+            word = int(m[0], base=2**acc.digit)
+            acc.words.append(word)
+        elif m := re.match(r'\{(.*?)\}', line):
+            fmt, words, expr = parse_patch(acc, m[1])
+            if fmt is None:
+                raise Exception("TODO: a default format")
+            if words is None:
+                raise Exception("TODO: a default format")
+            acc.patches.append({
+                'off': len(acc.words),
+                'fmt': fmt,
+                'expr': expr
+            })
+            acc.words += words
+        # TODO directives (align, pad, section?)
+        else:
+            raise Exception()
+        line = line[m.end():].lstrip()
+
+def parse_words(asm, line):
+    acc = []
+    if m := acc.WORD_REGEX.match(line):
+        word = int(m[0], base=2**acc.digit)
+        acc.words.append(word)
+
+def parse_patch(asm, input):
+    parts = input.split(';')
+    if len(parts) == 1:
+        expr = parse_expr(parts[2].lstrip())
+        fmt = None
+        words = None
+    elif len(parts) == 2:
+        expr = parse_expr(parts[2].lstrip())
+        fmt = parts[0].strip()
+        words = None
+    elif len(parts) == 3:
+        expr = parse_expr(parts[2].lstrip())
+        fmt = parts[0].strip()
+        words = []
+        words_input = parts[1].lstrip()
+        while words_input:
+            if m := asm.WORD_REGEX.match(words_input):
+                word = int(m[0], base=2**asm.digit)
+                words.append(word)
+                words_input = words_input[m.end():].lstrip()
+            else:
+                raise Exception()
+    else:
+        raise Exception()
+    expr, rest = expr
+    if rest: raise Exception(f"Syntax error: {rest}")
+    return fmt, words, expr
 
 # # Expression Trees and Evaluation
 
@@ -211,7 +354,7 @@ class ExprValue:
     def __repr__(self):
         return str(self.val)
     def reduce(self, env):
-        return self.val
+        return self
 
 class ExprVariable:
     def __init__(self, name: str):
@@ -220,7 +363,10 @@ class ExprVariable:
         return str(self.name)
     def reduce(self, env):
         if self.name in env:
-            return env[self.name]
+            x = env[self.name]
+            if type(x) is int:
+                x = ExprValue(x)
+            return x
         else:
             return self
 
@@ -229,15 +375,15 @@ class ExprFunction:
         self.name = func_name
         self.args = args
     def __repr__(self):
-        return f'{self.name}({", ".join(args)})'
+        return f'{self.name}({", ".join((str(x) for x in self.args))})'
 
     def reduce(self, env):
         if self.name not in FUNC_TAB:
             raise Exception(f"funknown function {self.name}")
         # TODO check number of arguments using `inspect.signature()`
         self.args = [x.reduce(env) for x in self.args]
-        if all((type(x) is int for x in self.args)):
-            return FUNC_TAB[self.name](*self.args)
+        if all((type(x) is ExprValue for x in self.args)):
+            return ExprValue(FUNC_TAB[self.name](*(x.val for x in self.args)))
         else:
             return self
 
@@ -265,32 +411,32 @@ class ExprParens:
             if self.children[i] == '*':
                 a = self.children[i-1]
                 b = self.children[i+1]
-                if type(a) is int and type(b) is int:
-                    self.children[i-1:i+2] = [a * b]
+                if type(a) is ExprValue and type(b) is ExprValue:
+                    self.children[i-1:i+2] = [ExprValue(a.val * b.val)]
                 else:
                     mult_finished = False
                     i += 2
             else:
                 i += 2
         # now it's just addition and subtraction
-        if mult_finished:
-            acc = self.children[0]
+        if mult_finished and type(self.children[0]) is ExprValue:
+            acc = self.children[0].val
             i = 1
             while i < len(self.children) - 1:
                 if self.children[i] == '+':
                     b = self.children[i+1]
-                    if type(b) is not int:
+                    if type(b) is not ExprValue:
                         return self
-                    acc += b
+                    acc += b.val
                 elif self.children[i] == '-':
                     b = self.children[i+1]
-                    if type(b) is not int:
+                    if type(b) is not ExprValue:
                         return self
-                    acc -= self.children[i + 1]
+                    acc -= b.val
                 else:
                     raise Exception()
                 i += 2
-            return acc
+            return ExprValue(acc)
         else:
             return self
 
@@ -305,22 +451,17 @@ class ExprParens:
 # wheras a `None` specifies a padding bit.
 # The patch is performed by masking the non-padding value's bits with the bits present in the binary source.
 
-def patch(pattern, bits, value):
-    """Provide the `bits` as an iterable of bits (big-endian within a word, then from low-to-high address).
-    Then, give the value as just the integer.
-    This will return an iterable of patched bits (same order as the input bits).
-    The length of bits must be an integral number of the word size, and the number of words must match the pattern length.
-    """
+def patch_bits(format, bits, value):
     bits = list(bits)
-    if len(bits) != pattern.nbits:
-        raise Exception("mismatched number of bits for the pattern")
-    for i in range(0, pattern.nbits):
-        if pattern.indexes[i] is None:
+    if (nbits := len(bits)) != format['nbits']:
+        raise Exception("mismatched number of bits for the format")
+    for i in range(0, format['nbits']):
+        if format['indexes'][i] is None:
             yield bits[i]
         else:
-            yield (value >> i) & 1
+            yield (value >> (nbits-1 - i)) & 1
 
-def parse_pattern(input):
+def parse_format(input):
     input = input.lstrip()
     acc = []
     while input:
@@ -339,11 +480,9 @@ def parse_pattern(input):
         elif m := re.match(r'\d+', input):
             acc += [int(m[0])]
         else:
-            raise Exception(f"pattern syntax error: {input}")
+            raise Exception(f"format syntax error: {input}")
         input = input[m.end():].lstrip()
     return acc
-
-
 
 # # Kickoff
 
