@@ -1,6 +1,3 @@
--- TODO I think I should just build it with a single digit and wordsize (configured at the top of source)
--- cross-compiling is complexity that you don't want to hand-compile+assemble+link
-
 -- TODO the think I'm working on seems more like a linker than an assembler, tbh
 
 -- Binary Assembler In Haskell
@@ -34,89 +31,179 @@
 -- Skip this on first read.
 -- It's just imports and helpers that improve on some poor design decisions.
 
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wall #-}
 
-module Main where
+module Main (main) where
 
-import Prelude hiding (head)
+import Prelude hiding (head, words)
 
-import Data.Char (toLower)
+import Control.Monad (forM_)
+import Data.Bits (Bits(shiftL))
+import Data.Char (ord, toLower)
+import System.Exit (exitFailure)
+import System.IO (getContents)
 
 head :: [a] -> Maybe a
 head [] = Nothing
 head (x:_) = Just x
 
+forAccum_ :: (Monad m) => b -> [a] -> (b -> a -> m b) -> m b
+forAccum_ st0 xs0 f = go st0 xs0
+  where
+  go acc [] = pure acc
+  go acc (x:xs) = do
+    acc' <- f acc x
+    go acc' xs
+
+die :: (Show msg) => msg -> IO a
+die msg = print msg >> exitFailure -- TODO should print to stderr
+
+-- Hardcoded Configuration
+-- =======================
+
+-- Keep it simple!
+-- Why write and compile a bunch of code to manage option parsing and validation when the user is expected to be able to hand-compile from source?
+-- I've written this for 8-bit addressible data encoded in hexadecimal.
+-- If you need a different format, these are easy function/values to recode.
+
+-- Should specify number of bits per word.
+-- A word defined as filling the bitspace between two addresses.
+-- On most modern machines, this is eight bits, but you might need to target oddball machines.
+-- I'm personally partial to the "9-bit byte", so if I get a simulator for such a machine, this is the number I'd change to compensate.
+bitsPerWord :: Int
+bitsPerWord = 8
+
+-- Should (effectively) specify the base used to encode words in text (in the source).
+-- For exampe, a hexidecimal digit can hold four bits, whereas an octal digit holds three.
+-- If you need a non-integral number of bits per digit (e.g. decimal), delete this value and modify `digitsPerWord` and `spanWord` specially.
+bitsPerDigit :: Int
+bitsPerDigit = 4
+
+splitDigit :: String -> Maybe (Int, String)
+splitDigit (c:rest)
+  | '0' <= c && c <= '9' = pure (ord c - ord '0', rest)
+  | 'A' <= c && c <= 'F' = pure (ord c - ord 'A' + 10, rest)
+  | otherwise = Nothing
+splitDigit "" = Nothing
+
+-- Adapt Configuration to Functions
+-- --------------------------------
+--
+-- Instead of using the "config" directly, we wrap them into slightly-higher-level operations for use in the rest of the program.
+-- Effectively, these make it easier to swap out some of the implementation.
+
+digitsPerWord :: Int
+digitsPerWord = case bitsPerWord `divMod` bitsPerDigit of
+  (n, 0) -> n
+  (n, _) -> n + 1
+
+splitWord :: String -> Maybe (Int, String)
+splitWord = go digitsPerWord 0
+  where
+  go 0 acc rest = pure (acc, rest)
+  go i acc str = do
+    (digitVal, rest) <- splitDigit str
+    go (i - 1) (shiftL acc bitsPerDigit + digitVal) rest
+
 -- Entry Point
 -- ===========
 
 main :: IO ()
-main = print "TODO"
+main = do
+  input <- getContents
+  accum <- case parseMany emptyAccum input parseToken of
+    Right revacc -> pure $ revacc
+      { body = reverse revacc.body
+      }
+    Left err -> die err
+  -- TODO everything after this is hacky test stuff
+  let compressNewlines ('\n':'\n':rest) = compressNewlines ('\n':rest)
+      compressNewlines (c:rest) = c : compressNewlines rest
+      compressNewlines [] = []
+  let displayText :: BodyElem -> String
+      displayText (Word n) = show n -- TODO show in hex (or rather, use config'd render func
+      displayText (Ws ws) = ws
+  putStrLn "LABELS:"
+  forM_ accum.labels $ \(name, offset) -> putStrLn $ name ++ ": " ++ show offset
+  putStrLn "BODY:"
+  putStr $ compressNewlines (concat $ displayText <$> accum.body)
 
--- File Options
--- ============
+-- TODO do I read the body into memory or write it to a file
+-- (and then patch before writing anything to disk, or write as I go and use fseek to patch?)
+-- for now, I'll write to memory, because that's easier
 
-parseMeta :: Line -> Either ParseError (FileMeta -> FileMeta)
-parseMeta line = do
-  (name, value) <- parseMetaLine
-  case name of
-    "digit" -> parseMetaDigit value
-    "wordbits" -> undefined
-    "defaultformat" -> undefined
-    _ -> Left $ BadOptionName name
+data Accum = Accum
+  { offset :: !Offset
+  , body :: [BodyElem]
+  , labels :: [(Name, Offset)]
+  }
+  deriving (Show)
+
+emptyAccum :: Accum
+emptyAccum = Accum
+  { offset = 0
+  , body = []
+  , labels = []
+  }
+
+data BodyElem
+  = Word Int
+  | Ws String
+  deriving(Show)
+
+parseToken :: Accum -> String -> Either LinkError (Accum, String)
+parseToken acc input = if
+  -- plain word
+  | Just (word, rest) <- splitWord input
+  -> let acc' = acc
+          { offset = acc.offset + 1
+          , body = Word word:acc.body
+          }
+     in  pure (acc', rest)
+  -- labels
+  | Just (name, input') <- splitId input
+  , (':':rest) <- input'
+  -> pure (acc{labels = (name, acc.offset):acc.labels}, rest)
+  -- TODO patch point
+  -- TODO directives (pad, align, default layout, let & maybe var, namespace, define patch layout)
+  | (':':rest0) <- input
+  , Just (name, rest) <- splitSimpleId rest0
+  -> undefined
+  -- comments
+  | ('#':_) <- input
+  -> pure $ (acc{body = Ws input:acc.body}, "")
+  -- whitespace and end of line
+  | "" <- input
+  -> pure (acc{body = Ws "\n":acc.body}, "")
+  | Just (ws, rest) <- splitWs input
+  -> pure (acc{body = Ws ws:acc.body}, rest)
+  -- syntax error
+  | otherwise
+  -> Left $ SyntaxError input
+
+parseMany :: s -> String -> (s -> String -> Either LinkError (s, String)) -> Either LinkError s
+parseMany st0 str0 f = go st0 str0
   where
-  parseMetaLine :: Either ParseError (String, String)
-  parseMetaLine = do
-    case splitSimpleId line of
-      Just (name, ':':value) -> pure (toLower <$> name, dropWs value)
-      _ -> Left $ BadOptionLine line
-
-parseMetaDigit :: String -> Either ParseError (FileMeta -> FileMeta)
-parseMetaDigit value = case toLower <$> value of
-  "hex" -> Right $ update 4
-  "oct" -> Right $ update 3
-  "bin" -> Right $ update 1
-  _ -> Left $ BadOptionValue "digit" value
-  where
-  update n opts = opts{digit = n:opts.digit}
-
--- TODO parseMetaWordbits
-
--- TODO parseMetaDefaultFormat
-
--- TODO validate the parsed options
+  go st "" = pure st
+  go st str = do
+    (st', rest) <- f st str
+    go st' rest
 
 -- Support
 -- =======
 
-type Line = String
+type Name = String -- TODO should be a newtype
 
-type Name = String
-
--- Configuration
--- -------------
-
--- TODO a way to set the output's words per line?
--- or, just keep the whitespace as it exists
--- probably would just be a CLI flag, since output format isn't tied to the input files
-
-data FileMeta = FileMeta
-  { digit :: [Int] -- ^ number of bits per digit
-  , word :: [Int] -- ^ number of bits per word
-  }
-
-emptyFileMeta :: FileMeta
-emptyFileMeta = FileMeta
-  { digit = []
-  , word = []
-  -- , defaultFormat = [] -- TODO actually, the default format should likely be part of the data stream
-  }
+type Offset = Int -- TODO should be unsigned, and perhaps a newtype
 
 -- Parsing
 -- -------
 
-dropWs :: String -> String
-dropWs = dropWhile (`elem` " \t")
+splitWs :: String -> Maybe (String, String)
+splitWs "" = Nothing
+splitWs it = Just $ span (`elem` " \t\n\r") it
 
 inClass :: Char -> String -> Bool
 inClass c = go
@@ -128,16 +215,26 @@ inClass c = go
 splitSimpleId :: String -> Maybe (String, String)
 splitSimpleId [] = Nothing
 splitSimpleId (c:tl)
-  | c `inClass` "a-zA-Z"
-  , (cs, rest) <- span (`inClass` "a-zA-Z0-9_") tl
+  | c `inClass` simpleIdStart
+  , (cs, rest) <- span (`inClass` idBody simpleIdStart) tl
   = Just (c:cs, rest)
   | otherwise = Nothing
+
+splitId :: String -> Maybe (String, String)
+splitId [] = Nothing
+splitId (c:tl)
+  | c `inClass` idStart
+  , (cs, rest) <- span (`inClass` idBody idStart) tl
+  = Just (c:cs, rest)
+  | otherwise = Nothing
+
+simpleIdStart = "a-zA-Z"
+idStart = simpleIdStart ++ "@$^_."
+idBody = (++ "0-9")
 
 -- Errors
 -- ------
 
-data ParseError
-  = BadOptionLine Line
-  | BadOptionName Name
-  | BadOptionValue Name String
+data LinkError
+  = SyntaxError String
   deriving(Show)
