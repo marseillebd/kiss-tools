@@ -32,16 +32,18 @@
 -- It's just imports and helpers that improve on some poor design decisions.
 
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wall #-}
 
 module Main (main) where
 
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Bits (Bits((.&.), (.|.), shiftL, shiftR, testBit))
 import Data.Char (chr, ord, toLower)
 import Data.List (dropWhileEnd, intercalate)
+import Data.Maybe (isNothing)
 import Data.Word (Word8)
 import System.Exit (exitFailure)
 
@@ -96,7 +98,6 @@ renderDigit b
   | 10 <= b && b <= 15 = chr (ord 'A' -10 + intCast b)
   | otherwise = undefined
 
--- TODO render byte as text
 -- TODO render byte as binary
 -- if cross-linking, I'd suggest a bitstream, which would change some architecture
 
@@ -140,16 +141,19 @@ lowByteMask = (1 `shiftL` bitsPerByte) - 1
 
 main :: IO ()
 main = do
+  -- TODO parse comdline args
   input <- getContents
+  -- parse the whole file
   unevald <- case parseTokens input of
     Right it -> pure it
     Left err -> die err
   -- TODO evaluate expressions
   let unpatched = unevald
-  -- TODO patch the payload
-  patchedPayload <- case patch unpatched of
+  -- patch the payload
+  patchedPayload <- case runPatch unpatched of
     Right ok -> pure ok
     Left err -> die (show err)
+  -- TODO output the result
   -- TODO everything after this is hacky test stuff
   let displayText :: Payload -> String
       displayText (Byte n) = renderByte n
@@ -157,16 +161,16 @@ main = do
   let debugPattern = intercalate "," . fmap (maybe "x" show)
   putStrLn "LAYOUTS:"
   forM_ unevald.layouts $ \(name, layout) -> putStrLn $ name ++ ": " ++ debugPattern layout.pattern
-  putStrLn "LABELS:"
-  forM_ unevald.labels $ \(name, offset) -> putStrLn $ name ++ ": " ++ show offset
+  putStrLn "VALUES:"
+  forM_ unpatched.values $ \(name, v) -> putStrLn $ name ++ ": " ++ show v
   putStrLn "PATCHES:"
   forM_ unevald.patches $ \patch -> putStrLn $ show patch.offset ++ " <-(" ++ debugPattern patch.layout.pattern ++ ") " ++ show patch.expr
   putStrLn "BODY:"
-  putStr $ concat $ displayText <$> unevald.payload
-  putStrLn ">>>>>>>>>>>>"
-  putStr $ concat $ displayText <$> patchedPayload
-  putStrLn "============"
-  print unevald
+  -- putStr $ concatMap displayText unevald.payload
+  -- putStrLn ">>>>>>>>>>>>"
+  putStr $ concatMap displayText patchedPayload
+  -- putStrLn "============"
+  -- print unevald
 
 -- TODO do I read the payload into memory or write it to a file
 -- (and then patch before writing anything to disk, or write as I go and use fseek to patch?)
@@ -174,10 +178,12 @@ main = do
 
 data Accum = Accum
   { offset :: !Offset
+  , namespace :: String
   , defaultLayout :: Maybe Layout
   , layouts :: [(Name, Layout)]
   , payload :: [Payload]
-  , labels :: [(Name, Offset)]
+  , exprs :: [(Name, Expr)]
+  , values :: [(Name, Value)]
   , patches :: [Patch]
   }
   deriving (Show)
@@ -185,10 +191,12 @@ data Accum = Accum
 emptyAccum :: Accum
 emptyAccum = Accum
   { offset = 0
+  , namespace = ""
   , defaultLayout = Nothing
   , layouts = []
   , payload = []
-  , labels = []
+  , exprs = []
+  , values = []
   , patches = []
   }
 
@@ -196,7 +204,13 @@ emptyAccum = Accum
 -- ==========
 
 parseDirective :: Name -> String -> Accum -> Either LinkError Accum
-  -- TODO directives (pad, align, let & perhaps also var, namespace)
+  -- TODO more directives (pad, align, let & perhaps also var)
+parseDirective "namespace" str0 acc = do
+  ns <- case splitId str0 of
+    Just (name, "") -> pure name
+    Nothing -> pure ""
+    Just (_, rest) -> Left $ SyntaxError "unexpected tokens after namespace directive:" rest
+  pure acc{namespace = ns}
 parseDirective "defaultlayout" str0 acc = do
   name <- case splitId str0 of
     Just (name, "") -> pure name
@@ -213,16 +227,15 @@ parseDirective "layout" str0 acc = do
   (name, str1) <- case splitId str0 of
     Just it -> pure it
     _ -> Left $ SyntaxError "expecting layout name" str0
-  (str2) <- case splitWs str1 of
+  str2 <- case splitWs str1 of
     Just (_, it) -> pure it
     Nothing -> Left $ SyntaxError "expecting space after layout name" str1
   pattern <- parseLayout str2
-  if
-    | length pattern `mod` bitsPerByte /= 0
-    || length pattern == 0
-    -- TODO pattern too long to store in `Value`
-    -> Left BadLayoutSize
-    | otherwise -> pure ()
+  let lenBad =
+           length pattern `mod` bitsPerByte /= 0
+        || null pattern -- i.e. length is zero
+        -- TODO pattern too long to store in `Value`
+  when lenBad $ Left BadLayoutSize
   let layout = Layout
         { pattern = pattern
         , nBytes = length pattern `div` bitsPerByte
@@ -256,7 +269,7 @@ parseLayout str0 = if
   | (c:'*':str1) <- str0
   , c `elem` "xX"
   , Just (n, rest) <- splitInt str1
-  -> (take n (repeat Nothing) ++) <$> parseLayout rest
+  -> (replicate n Nothing ++) <$> parseLayout rest
   -- single padding bit
   | (c:rest) <- str0
   , c `elem` "xX"
@@ -312,23 +325,26 @@ parsePatch inner = case strtok ';' inner of
     -> pure (Byte byte : bytes, rest)
     -- whitespace
     | Just (ws, rest) <- splitWs input
-    -> pure $ (Ws ws : bytes, rest)
+    -> pure (Ws ws : bytes, rest)
     | otherwise -> Left $ SyntaxError "unexpected tokens in patch base" input
 
-patch :: Accum -> Either LinkError [Payload]
-patch accum = go 0 accum.patches accum.payload
+runPatch :: Accum -> Either LinkError [Payload]
+runPatch accum = go 0 accum.patches accum.payload
   where
   go :: Int -> [Patch] -> [Payload] -> Either LinkError [Payload]
   go !_ [] payload = pure payload
   go !i (p:ps) payload | p.offset == i = do
-    value <- case eval undefined p.expr of
-      Lit v -> pure v
+    -- The names `@` and `@@` are reserved for the start/end of the patch.
+    -- THe memnonic is that "at" means "here" and the longer one is for the larger (later) side of here.
+    let env = [("@", p.offset), ("@@", p.offset + p.layout.nBytes)] ++ accum.values
+    value <- eval env p.expr >>= \case
+      Val v -> pure v
       other -> Left $ IncompleteEvaluation other
     let payload' = patch1 p.layout value payload
     go i ps payload'
   go !i ps (Byte b : rest) = (Byte b :) <$> go (i + 1) ps rest
   go !i ps (Ws ws : rest) = (Ws ws :) <$> go i ps rest
-  go !_ _ [] = errorWithoutStackTrace "internal error"
+  go !_ _ [] = error "internal error"
 
 patch1 :: Layout -> Value -> [Payload] -> [Payload]
 patch1 layout value base =
@@ -360,7 +376,6 @@ patchValue base layout value =
   fromBools :: Value -> [Bool] -> Value
   fromBools acc [] = acc
   fromBools acc (b:rest) = fromBools ((acc `shiftL` 1) + (if b then 1 else 0)) rest
-  isNothing = maybe True (const False)
 
 valueToBytes :: Layout -> Value -> [Byte]
 valueToBytes layout value = [intCast $ getByte i | i <- byteIxs]
@@ -372,33 +387,133 @@ valueToBytes layout value = [intCast $ getByte i | i <- byteIxs]
 -- ===========
 
 data Expr
-  = Lit Value
-  -- TODO Name
-  -- TODO binops
-  -- TODO function call
+  = Val Value
+  | Var Name
+  | Func Name [Expr]
+  | Arith Expr [(BinOp,Expr)]
+  deriving (Show)
+
+data BinOp
+  = Add
+  | Sub
+  | Mul
   deriving (Show)
 
 parseExpr :: String -> Either LinkError Expr
 parseExpr input0 = do
-  (expr, rest) <- go input0
-  case splitWs rest of
-    Nothing -> pure expr
-    Just (_, "") -> pure expr
-    _ -> Left $ SyntaxError "unexpected tokens in expression" rest
-  where
-  go :: String -> Either LinkError (Expr, String)
-  go input
-    -- literals
-    | (n@(_:_), rest) <- span (`inClass` "0-9") input
-    = pure (Lit $ read n, rest)
-    -- whitespace
-    | Just (_, rest) <- splitWs input
-    = go rest
-    | otherwise
-    = Left $ SyntaxError "unexpected tokens in expression" input
+  (expr, rest) <- splitExpr input0
+  case dropWs rest of
+    "" -> pure expr
+    _ -> Left $ SyntaxError "unexpected tokens after expression" rest
 
-eval :: [(Name, Value)] -> Expr -> Expr
-eval _ (Lit v) = Lit v
+splitExpr :: String -> Either LinkError (Expr, String)
+splitExpr input = do
+  (e, rest) <- splitAtom input
+  arithLoop e [] rest
+
+arithLoop :: Expr -> [(Expr, BinOp)] -> String -> Either LinkError (Expr, String)
+arithLoop e0 revacc input
+  -- operator
+  | (c:input') <- input
+  , Just op <- lookup c [('+', Add), ('-', Sub), ('*', Mul)]
+  = case splitAtom input' of
+    Right (e, rest) -> arithLoop e0 ((e,op):revacc) rest
+    Left err -> Left $ StackedError (SyntaxError "expecting expression after operator" input') err
+  -- whitespace
+  | Just (_, rest) <- splitWs input
+  = arithLoop e0 revacc rest
+  -- anything else
+  | otherwise = case unzip $ reverse revacc of
+    ([], []) -> pure (e0, input)
+    (es, ops) -> pure (Arith e0 (zip ops es), input)
+
+splitAtom :: String -> Either LinkError (Expr, String)
+splitAtom input
+  -- literals
+  | (n@(_:_), rest) <- span (`inClass` "0-9") input
+  = pure (Val $ read n, rest)
+  -- functions
+  | Just (name, input') <- splitId input
+  , ('(':input'') <- input'
+  = do
+    (args, rest) <- parseArgs input''
+    pure (Func name args, rest)
+  -- variables
+  | Just (x, rest) <- splitId input
+  = pure (Var x, rest)
+  -- parens
+  | ('(':input') <- input
+  = splitAtom input' >>= \case
+      (e, ')':rest) -> pure (e, rest)
+      (_, other) -> Left $ SyntaxError "expecting close parenthesis" other
+  -- whitespace
+  | Just (_, rest) <- splitWs input
+  = splitAtom rest
+  | "" <- input
+  = Left $ SyntaxError "unexpeted end of input" input
+  | otherwise
+  = Left $ SyntaxError "unexpected tokens in expression" input
+
+parseArgs :: String -> Either LinkError ([Expr], String)
+parseArgs input
+  | (')':rest) <- dropWs input
+  = pure ([], rest)
+  | Right (e, input1) <- splitExpr input
+  = case dropWs input1 of
+    (')':rest) -> pure ([e], rest)
+    (',':input2) -> do
+      (es, rest) <- parseArgs input2
+      pure (e:es, rest)
+    other -> Left $ SyntaxError"expecting comma or close parenthesis" other
+  | otherwise = Left $ SyntaxError "expecting argument list" input
+
+eval :: [(Name, Value)] -> Expr -> Either LinkError Expr
+eval _ (Val v) = pure $ Val v
+eval env (Var x) = case lookup x env of
+  Just v -> pure $ Val v
+  Nothing -> pure $ Var x
+eval env (Func name args) = do
+  f <- case lookup name builtins of
+    Just f -> pure f
+    Nothing -> Left $ UnknownFunction name
+  args' <- mapM (eval env) args
+  case fromValues args' of
+    Nothing -> pure $ Func name args'
+    Just vals -> Val <$> f vals
+eval env (Arith e0 eOps) = do
+  let (ops0, es0) = unzip eOps
+  e0' <- eval env e0
+  es0' <- mapM (eval env) es0
+  case fromValues (e0':es0') of
+    Nothing -> pure $ Arith e0' (zip ops0 es0')
+    Just [] -> error "internal error"
+    Just (v0:vs0) -> do
+      let (v', vs', ops') = case doMuls ([], []) (v0:vs0) ops0 of
+            (a:b, c) -> (a, b, c)
+            _ -> error "internal error"
+          !v'' = v' + doSum vs' ops'
+      pure $ Val v''
+  where
+  doMuls (revEs, revOps) [e] [] = (reverse (e:revEs), reverse revOps)
+  doMuls !revacc (a:b:es) (Mul:ops) = doMuls revacc (a*b : es) ops
+  doMuls (revEs, revOps) (a:es) (op:ops) = doMuls (a:revEs, op:revOps) es ops
+  doMuls _ [] _ = error "internal error"
+  doMuls _ (_:_:_) [] = error "internal error"
+  doSum (v:vs) (Add:ops) = v + doSum vs ops
+  doSum (v:vs) (Sub:ops) = doSum vs ops - v
+  doSum (_:_) (Mul:_) = error "internal error"
+  doSum [] [] = 0
+  doSum _ _ = error "internal error"
+
+fromValues :: [Expr] -> Maybe [Value]
+fromValues = mapM fromValue
+
+fromValue :: Expr -> Maybe Value
+fromValue (Val v) = Just v
+fromValue _ = Nothing
+
+builtins :: [(Name, [Value] -> Either LinkError Value)]
+builtins = [] -- TODO
 
 -- Payload
 -- =======
@@ -427,9 +542,12 @@ parseToken acc input = if
      in  pure (acc', rest)
   -- labels
   | Just (name, input') <- splitId input
-  , (':':rest) <- input'
-  -- TODO add namespace to the label
-  -> pure (acc{labels = (name, acc.offset):acc.labels}, rest)
+  , (':':rest0) <- input'
+  , rest <- dropWhile (`elem` " \t") rest0
+  , fullname <- case name of
+      ('.':_) -> acc.namespace ++ name
+      _ -> name
+  -> pure (acc{values = (fullname, acc.offset):acc.values}, rest)
   -- patch point
   | Just (inner, rest) <- splitPatch input
   -> do
@@ -440,10 +558,10 @@ parseToken acc input = if
         Nothing -> Left $ UnknownLayout layoutName
       Nothing -> case acc.defaultLayout of
         Just layout -> pure layout
-        Nothing -> Left $ MissingDefaultLayout
+        Nothing -> Left MissingDefaultLayout
     base <- case base_m of
       Just base -> pure base
-      Nothing -> pure $ take layout.nBytes $ repeat (Byte 0)
+      Nothing -> pure $ replicate layout.nBytes (Byte 0)
     let patch = Patch
           { offset = acc.offset
           , layout = layout
@@ -465,7 +583,7 @@ parseToken acc input = if
   -- comments
   | ('#':_) <- input
   , (comment, rest) <- span (`notElem` "\n\r") input
-  -> pure $ (acc{payload = Ws comment:acc.payload}, rest)
+  -> pure (acc{payload = Ws comment:acc.payload}, rest)
   -- whitespace and end of line
   | "" <- input
   -> pure (acc{payload = Ws "\n":acc.payload}, "")
@@ -495,6 +613,9 @@ parseMany st0 str0 f = go st0 str0
 
 trim :: String -> String
 trim = dropWhileEnd (`elem` " \t") . dropWhile (`elem` " \t")
+
+dropWs :: String -> String
+dropWs = dropWhile (`elem` " \t\n\r")
 
 splitWs :: String -> Maybe (String, String)
 splitWs str = case span (`elem` " \t\n\r") str of
@@ -526,7 +647,7 @@ simpleIdStart :: String
 simpleIdStart = "a-zA-Z"
 
 idStart :: String
-idStart = simpleIdStart ++ "@$^_."
+idStart = simpleIdStart ++ "@$^_.<>"
 
 idBody :: String -> String
 idBody = ("0-9" ++)
@@ -549,4 +670,7 @@ data LinkError
   | DoubleDefaultDefinition
   | BadLayoutSize
   | IncompleteEvaluation Expr
+  | UnknownFunction Name
+  | BadArguments [Expr]
+  | StackedError LinkError LinkError
   deriving(Show)
