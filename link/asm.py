@@ -11,10 +11,10 @@ def main():
     be: 15-0
     le: 7-0 15-8
     octet: 7-0
-    it = 2 * (2+3) + 3
+    it = 3 + 2 * (2+3)
     ---
     {2}
-    one: {two-one.start} one.start: 01 02 03 04 05
+    one: {two - one.start} one.start: 01 02 03 04 05
     two: {end-two.start} two.start: 00 01 01 02 03 05 08 {octet; it}
     end:
     """
