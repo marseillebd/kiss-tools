@@ -15,7 +15,14 @@ somevals:
 end: {end - somevals}
 
 :namespace strtab
-{.end - @@}
-01 02 03 04 05
+{.nstrs} # length of strtab in entries
+{.end - @@} # length of strtab in bytes
+.e1: {.e2 - @@} # length of string 1
+  01 02 03 04 05
+.e2: {.e3 - @@} # length of string 2
+  00 01 01 02 03 05 08 0d
+.e3:
+:let .nstrs smthng
+:let smthng 2
 .end:
 #eof

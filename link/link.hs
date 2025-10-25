@@ -37,7 +37,7 @@
 
 module Main (main) where
 
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Bits (Bits((.&.), (.|.), shiftL, shiftR, testBit))
 import Data.Char (chr, ord, toLower)
 import Data.List (dropWhileEnd, intercalate)
@@ -57,7 +57,7 @@ strtok c = go
     (x, rest) -> x : go rest
 
 die :: (Show msg) => msg -> IO a
-die msg = print msg >> exitFailure -- TODO should print to stderr
+die msg = print msg >> exitFailure -- FIXME should print to stderr
 
 -- Hardcoded Configuration
 -- =======================
@@ -96,7 +96,7 @@ renderDigit b
   | 10 <= b && b <= 15 = chr (ord 'A' -10 + intCast b)
   | otherwise = undefined
 
--- TODO render byte as binary
+-- FIXME render byte as binary
 -- if cross-linking, I'd suggest a bitstream, which would change some architecture
 
 
@@ -104,7 +104,7 @@ renderDigit b
 -- It needs to be signed, because bit testing might not do 2s-complement
 type Value = Int -- TODO make it a newtype
 
--- TODO a bit test function for Value
+-- FIXME a bit test function for Value
 
 -- Adapt Configuration to Functions
 -- --------------------------------
@@ -139,30 +139,34 @@ lowByteMask = (1 `shiftL` bitsPerByte) - 1
 
 main :: IO ()
 main = do
-  -- TODO parse cmdline args
+  -- FIXME parse cmdline args
   input <- getContents
   -- parse the whole file
   unevald <- case parseTokens input of
     Right it -> pure it
     Left err -> die err
-  -- TODO evaluate expressions
-  let unpatched = unevald
+  -- evaluate expressions
+  unpatched <- case runEval unevald of
+    Right it -> pure it
+    Left err -> die err
   -- patch the payload
   patchedPayload <- case runPatch unpatched of
     Right ok -> pure ok
     Left err -> die (show err)
-  -- TODO output the result
-  -- TODO everything after this is hacky test stuff
+  -- FIXME output the result
+  -- FIXME everything after this is hacky test stuff
   let displayText :: Payload -> String
       displayText (Byte n) = renderByte n
       displayText (Ws ws) = ws
   let debugPattern = intercalate "," . fmap (maybe "x" show)
   putStrLn "LAYOUTS:"
   forM_ unevald.layouts $ \(name, layout) -> putStrLn $ name ++ ": " ++ debugPattern layout.pattern
+  putStrLn "EXPRESSIONS:"
+  forM_ unevald.exprs $ \(name, e) -> putStrLn $ name ++ ": " ++ show e
   putStrLn "VALUES:"
   forM_ unpatched.values $ \(name, v) -> putStrLn $ name ++ ": " ++ show v
   putStrLn "PATCHES:"
-  forM_ unevald.patches $ \patch -> putStrLn $ show patch.offset ++ " <-(" ++ debugPattern patch.layout.pattern ++ ") " ++ show patch.expr
+  forM_ unpatched.patches $ \patch -> putStrLn $ show patch.offset ++ " <-(" ++ debugPattern patch.layout.pattern ++ ") " ++ show patch.expr
   putStrLn "BODY:"
   -- putStr $ concatMap displayText unevald.payload
   -- putStrLn ">>>>>>>>>>>>"
@@ -202,13 +206,16 @@ emptyAccum = Accum
 -- ==========
 
 parseDirective :: Name -> String -> Accum -> Either LinkError Accum
-  -- TODO more directives (pad, align, let & perhaps also var)
+  -- FIXME more directives (pad, align, let)
 parseDirective "namespace" str0 acc = do
   ns <- case splitId str0 of
     Just (name, "") -> pure name
     Nothing -> pure ""
     Just (_, rest) -> Left $ SyntaxError "unexpected tokens after namespace directive:" rest
-  pure acc{namespace = ns}
+  let qualNs = case ns of
+        ('.':_) -> acc.namespace ++ ns -- nest namespaces
+        _ -> ns
+  pure acc{namespace = qualNs}
 parseDirective "defaultlayout" str0 acc = do
   name <- case splitId str0 of
     Just (name, "") -> pure name
@@ -241,6 +248,17 @@ parseDirective "layout" str0 acc = do
   pure acc
     { layouts = (name, layout) : acc.layouts
     }
+-- TODO I think I should probably create a splitQualId that also prepends a passed namespace when appropriate
+parseDirective "let" str0 acc = do
+  (name, str1) <- case splitId str0 of
+    Just it -> pure it
+    _ -> Left $ SyntaxError "expecting variable name" str0
+  let qualName = case name of
+        ('.':_) -> acc.namespace ++ name
+        _ -> name
+  e <- parseExpr acc.namespace str1
+  pure acc
+    { exprs = (qualName, e) : acc.exprs }
 parseDirective name _ _ = Left $ UnknownDirective name
 
 -- Layouts
@@ -484,6 +502,29 @@ parseExpr ns input0 = do
         (es, rest2) <- argsList input3
         pure (e:es, rest2)
       _ -> pure ([e], rest)
+
+runEval :: Accum -> Either LinkError Accum
+runEval acc | null acc.exprs = pure acc
+runEval acc = do
+  rs <- forM acc.exprs $ \(name, e) -> do
+    r <- eval acc.values e
+    pure (name, r)
+  let (vs, es) = partitionValues rs
+  case vs of
+    [] -> forM_ es $ \(_, e) -> Left $ IncompleteEvaluation e -- TODO probably a better error message
+    _ -> pure ()
+  runEval acc
+    { exprs = es
+    , values = vs ++ acc.values
+    }
+
+  where
+  partitionValues :: [(Name, Expr)] -> ([(Name, Value)], [(Name, Expr)])
+  partitionValues = loop [] []
+    where
+    loop vs es [] = (vs, es)
+    loop vs es ((x, Val v):rest) = loop ((x, v):vs) es rest
+    loop vs es (e:rest) = loop vs (e:es) rest
 
 eval :: [(Name, Value)] -> Expr -> Either LinkError Expr
 eval _ (Val v) = pure $ Val v
