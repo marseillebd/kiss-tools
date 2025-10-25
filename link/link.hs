@@ -1,5 +1,3 @@
--- TODO the think I'm working on seems more like a linker than an assembler, tbh
-
 -- Binary Assembler In Haskell
 -- ===========================
 --
@@ -39,7 +37,7 @@
 
 module Main (main) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, unless, when)
 import Data.Bits (Bits((.&.), (.|.), shiftL, shiftR, testBit))
 import Data.Char (chr, ord, toLower)
 import Data.List (dropWhileEnd, intercalate)
@@ -141,7 +139,7 @@ lowByteMask = (1 `shiftL` bitsPerByte) - 1
 
 main :: IO ()
 main = do
-  -- TODO parse comdline args
+  -- TODO parse cmdline args
   input <- getContents
   -- parse the whole file
   unevald <- case parseTokens input of
@@ -300,19 +298,19 @@ splitPatch ('{':input) = do
     _ -> Nothing
 splitPatch _ = Nothing
 
-parsePatch :: String -> Either LinkError (Maybe Name, Maybe [Payload], Expr)
-parsePatch inner = case strtok ';' inner of
+parsePatch :: Name -> String -> Either LinkError (Maybe Name, Maybe [Payload], Expr)
+parsePatch ns inner = case strtok ';' inner of
   [exprStr] -> do
-    expr <- parseExpr exprStr
+    expr <- parseExpr ns exprStr
     pure (Nothing, Nothing, expr)
   [layoutStr, exprStr] -> do
     layoutName <- parseLayoutName layoutStr
-    expr <- parseExpr exprStr
+    expr <- parseExpr ns exprStr
     pure (Just layoutName, Nothing, expr)
   [layoutStr, bytesStr, exprStr] -> do
     layoutName <- parseLayoutName layoutStr
     base <- parseBytes bytesStr
-    expr <- parseExpr exprStr
+    expr <- parseExpr ns exprStr
     pure (Just layoutName, Just base, expr)
   _ -> Left $ SyntaxError "expecting 1-3 semicolon-delimited sections in patch" inner
   where
@@ -335,7 +333,7 @@ runPatch accum = go 0 accum.patches accum.payload
   go !_ [] payload = pure payload
   go !i (p:ps) payload | p.offset == i = do
     -- The names `@` and `@@` are reserved for the start/end of the patch.
-    -- THe memnonic is that "at" means "here" and the longer one is for the larger (later) side of here.
+    -- The memnonic is that "at" means "here" and the longer one is for the larger (later) side of here.
     let env = [("@", p.offset), ("@@", p.offset + p.layout.nBytes)] ++ accum.values
     value <- eval env p.expr >>= \case
       Val v -> pure v
@@ -399,73 +397,93 @@ data BinOp
   | Mul
   deriving (Show)
 
-parseExpr :: String -> Either LinkError Expr
-parseExpr input0 = do
-  (expr, rest) <- splitExpr input0
-  case dropWs rest of
-    "" -> pure expr
-    _ -> Left $ SyntaxError "unexpected tokens after expression" rest
+-- ```ebnf
+-- expr = arithExpr ;
+-- arithExpr = [ws] simpleExpr [ [ws] binOp arithExpr] ;
+-- binOp = '+' | '-' | '*' ;
+-- simpleExpr
+--   = number
+--   | identifier '(' [ws] [argsList [ws]] ')'
+--   | identifier
+--   | '(' arithExpr [ws] ')' ;
+-- argsList = arithExpr [ [ws] ',' [ws] argsList ]
+-- ```
 
-splitExpr :: String -> Either LinkError (Expr, String)
-splitExpr input = do
-  (e, rest) <- splitAtom input
-  arithLoop e [] rest
+parseExpr :: Name -> String -> Either LinkError Expr
+parseExpr ns input0 = do
+  (e, rest) <- expr input0
+  unless (null $ dropWs rest) $
+    Left $ SyntaxError "unexpected tokens after expression" rest
+  pure e
+  where
 
-arithLoop :: Expr -> [(Expr, BinOp)] -> String -> Either LinkError (Expr, String)
-arithLoop e0 revacc input
-  -- operator
-  | (c:input') <- input
-  , Just op <- lookup c [('+', Add), ('-', Sub), ('*', Mul)]
-  = case splitAtom input' of
-    Right (e, rest) -> arithLoop e0 ((e,op):revacc) rest
-    Left err -> Left $ StackedError (SyntaxError "expecting expression after operator" input') err
-  -- whitespace
-  | Just (_, rest) <- splitWs input
-  = arithLoop e0 revacc rest
-  -- anything else
-  | otherwise = case unzip $ reverse revacc of
-    ([], []) -> pure (e0, input)
-    (es, ops) -> pure (Arith e0 (zip ops es), input)
+  expr :: String -> Either LinkError (Expr, String)
+  expr input1 = do
+    (e, tl, rest) <- arithExpr input1
+    case tl of
+      [] -> pure (e, rest)
+      _ -> pure (Arith e tl, rest)
 
-splitAtom :: String -> Either LinkError (Expr, String)
-splitAtom input
-  -- literals
-  | (n@(_:_), rest) <- span (`inClass` "0-9") input
-  = pure (Val $ read n, rest)
-  -- functions
-  | Just (name, input') <- splitId input
-  , ('(':input'') <- input'
-  = do
-    (args, rest) <- parseArgs input''
-    pure (Func name args, rest)
-  -- variables
-  | Just (x, rest) <- splitId input
-  = pure (Var x, rest)
-  -- parens
-  | ('(':input') <- input
-  = splitAtom input' >>= \case
-      (e, ')':rest) -> pure (e, rest)
-      (_, other) -> Left $ SyntaxError "expecting close parenthesis" other
-  -- whitespace
-  | Just (_, rest) <- splitWs input
-  = splitAtom rest
-  | "" <- input
-  = Left $ SyntaxError "unexpeted end of input" input
-  | otherwise
-  = Left $ SyntaxError "unexpected tokens in expression" input
+  arithExpr :: String -> Either LinkError (Expr, [(BinOp, Expr)], String)
+  arithExpr input1 = do
+    let input2 = dropWs input1
+    (e, rest) <- simpleExpr input2
+    if
+      | input3 <- dropWs rest
+      , Just (op, input4) <- binOp input3
+      -> do
+        (e', tl, rest') <- arithExpr input4
+        pure (e, (op,e'):tl, rest')
+      | otherwise
+      -> pure (e, [], rest)
 
-parseArgs :: String -> Either LinkError ([Expr], String)
-parseArgs input
-  | (')':rest) <- dropWs input
-  = pure ([], rest)
-  | Right (e, input1) <- splitExpr input
-  = case dropWs input1 of
-    (')':rest) -> pure ([e], rest)
-    (',':input2) -> do
-      (es, rest) <- parseArgs input2
-      pure (e:es, rest)
-    other -> Left $ SyntaxError"expecting comma or close parenthesis" other
-  | otherwise = Left $ SyntaxError "expecting argument list" input
+  binOp :: String -> Maybe (BinOp, String)
+  binOp (c:rest)
+    | Just op <- lookup c [('+', Add), ('-', Sub), ('*', Mul)]
+    = pure (op, rest)
+  binOp _ = Nothing
+
+  simpleExpr :: String -> Either LinkError (Expr, String)
+  simpleExpr input1
+    -- literals
+    | (n@(_:_), rest) <- span (`inClass` "0-9") input1
+    = pure (Val $ read n, rest)
+    -- functions
+    | Just (name, input2) <- splitId input1
+    , ('(':input3) <- input2
+    , input4 <- dropWs input3
+    = case input4 of
+        (')': rest) -> pure (Func name [], rest)
+        _ -> do
+          (args, rest) <- argsList input4
+          case dropWs rest of
+            (')':rest') -> pure (Func name args, rest')
+            other -> Left $ SyntaxError "expected close paren" other
+    -- variables
+    | Just (x, rest) <- splitId input1
+    , qualX <- case x of { ('.':_) -> ns ++ x; _ -> x } -- add namespace when applicable
+    = pure (Var qualX, rest)
+    -- parens
+    | ('(':input2) <- input1
+    = do
+      (e, rest) <- expr input2
+      case rest of
+        (')':rest') -> pure (e, rest')
+        other -> Left $ SyntaxError "expecting close parenthesis" other
+    | "" <- input1
+    = Left $ SyntaxError "unexpeted end of input" input1
+    | otherwise
+    = Left $ SyntaxError "unexpected tokens in expression" input1
+
+  argsList :: String -> Either LinkError ([Expr], String)
+  argsList input1 = do
+    (e, rest) <- expr input1
+    case dropWs rest of
+      (',':input2) -> do
+        let input3 = dropWs input2
+        (es, rest2) <- argsList input3
+        pure (e:es, rest2)
+      _ -> pure ([e], rest)
 
 eval :: [(Name, Value)] -> Expr -> Either LinkError Expr
 eval _ (Val v) = pure $ Val v
@@ -551,7 +569,7 @@ parseToken acc input = if
   -- patch point
   | Just (inner, rest) <- splitPatch input
   -> do
-    (layout_m, base_m, expr) <- parsePatch inner
+    (layout_m, base_m, expr) <- parsePatch acc.namespace inner
     layout <- case layout_m of
       Just layoutName -> case lookup layoutName acc.layouts of
         Just layout -> pure layout

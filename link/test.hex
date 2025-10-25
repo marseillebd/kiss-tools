@@ -13,4 +13,9 @@ somevals:
   {256}
   {266}
 end: {end - somevals}
+
+:namespace strtab
+{.end - @@}
+01 02 03 04 05
+.end:
 #eof
