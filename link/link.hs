@@ -26,7 +26,7 @@
 -- The Boring Stuff
 -- ================
 --
--- Skip this on first read.
+-- Skip this section on first read.
 -- It's just imports and helpers that improve on some poor design decisions.
 
 {-# LANGUAGE DuplicateRecordFields #-}
@@ -38,26 +38,38 @@
 module Main (main) where
 
 import Control.Monad (forM, forM_, unless, when)
-import Data.Bits (Bits((.&.), (.|.), shiftL, shiftR, testBit))
+import Data.Bits (Bits((.&.), (.|.), shiftL, shiftR))
 import Data.Char (chr, ord, toLower)
-import Data.List (dropWhileEnd, intercalate)
+import Data.List (dropWhileEnd)
 import Data.Maybe (isNothing)
 import Data.Word (Word8)
-import System.Exit (exitFailure)
+import System.Environment (getArgs, getProgName)
+import System.Exit (exitFailure, exitSuccess)
+import System.IO (hPutStr, hPutStrLn, stderr, withBinaryFile, IOMode(WriteMode))
 
-intCast :: (Integral a, Integral b) => a -> b
-intCast = fromIntegral
+import qualified Data.Bits as Bits
 
+-- Just making the naming more familiar for non-Haskellers
+castInt :: (Integral a, Integral b) => a -> b
+castInt = fromIntegral
+
+-- Like the C standard library function, splits a string on a given character (which is not included in the substrings).
+-- Zero-length strings are emitted when two delimiters are adjacent.
 strtok :: Char -> String -> [String]
 strtok c = go
   where
   go "" = []
   go str = case span (/= c) str of
-    ("", rest) -> [rest]
-    (x, rest) -> x : go rest
+    ("", "") -> []
+    (x, "") -> [x]
+    (x, _:"") -> [x, ""]
+    (x, _:rest) -> x : go rest
 
 die :: (Show msg) => msg -> IO a
-die msg = print msg >> exitFailure -- FIXME should print to stderr
+die msg = hPutStrLn stderr (show msg) >> exitFailure
+
+writeBinaryFile :: FilePath -> String -> IO ()
+writeBinaryFile path str = withBinaryFile path WriteMode $ \fp -> hPutStr fp str
 
 -- Hardcoded Configuration
 -- =======================
@@ -92,19 +104,24 @@ splitDigit "" = Nothing
 
 renderDigit :: Byte -> Char
 renderDigit b
-  | b <= 9 = chr (ord '0' + intCast b)
-  | 10 <= b && b <= 15 = chr (ord 'A' -10 + intCast b)
+  | b <= 9 = chr (ord '0' + castInt b)
+  | 10 <= b && b <= 15 = chr (ord 'A' -10 + castInt b)
   | otherwise = undefined
 
--- FIXME render byte as binary
--- if cross-linking, I'd suggest a bitstream, which would change some architecture
-
+-- Converts our internal representation of a byte to something that can be written to a binary file.
+-- If the number of bits per digit for the file isn't a multiple of the target system's bits per byte (linking a 9-bit format on an 8-bit computer), you'll need to implement a bitstreaming algorithm.
+-- That would completely replace the binary output stage.
+byteToBin :: Byte -> [Char]
+byteToBin = (:[]) . chr . castInt
 
 -- This is the storage type for the results of expression computation, and so determined the maximum patch size
 -- It needs to be signed, because bit testing might not do 2s-complement
 type Value = Int -- TODO make it a newtype
 
--- FIXME a bit test function for Value
+-- Returns if the `i`th bit is set in the given value, where `i` is 0-indexed from the lowest order bit.
+-- Afaik, Haskell assumes 2s-complement representation, and that's what we use here.
+bitAt :: Int -> Value -> Bool
+bitAt = Bits.testBit
 
 -- Adapt Configuration to Functions
 -- --------------------------------
@@ -120,13 +137,13 @@ digitsPerByte = case bitsPerByte `divMod` bitsPerDigit of
 splitByte :: String -> Maybe (Byte, String)
 splitByte = go digitsPerByte 0
   where
-  go 0 acc rest = pure (intCast acc, rest)
+  go 0 acc rest = pure (castInt acc, rest)
   go i acc str = do
     (digitVal, rest) <- splitDigit str
     go (i - 1) (shiftL acc bitsPerDigit + digitVal) rest
 
 renderByte :: Byte -> String
-renderByte b = reverse [renderDigit $ (b `shiftR` (i * intCast bitsPerDigit)) .&. intCast lowDigitMask | i <- [0 .. digitsPerByte-1]]
+renderByte b = reverse [renderDigit $ (b `shiftR` (i * castInt bitsPerDigit)) .&. castInt lowDigitMask | i <- [0 .. digitsPerByte-1]]
 
 lowDigitMask :: Value
 lowDigitMask = (1 `shiftL` bitsPerDigit) - 1
@@ -139,8 +156,11 @@ lowByteMask = (1 `shiftL` bitsPerByte) - 1
 
 main :: IO ()
 main = do
-  -- FIXME parse cmdline args
-  input <- getContents
+  opts <- parseCliArgs =<< getArgs
+  input <- case opts.inputFiles of
+    [] -> die "missing input files"
+    [path] -> readFile path
+    _ -> die "unimplemented: multiple input files" -- TODO
   -- parse the whole file
   unevald <- case parseTokens input of
     Right it -> pure it
@@ -153,26 +173,76 @@ main = do
   patchedPayload <- case runPatch unpatched of
     Right ok -> pure ok
     Left err -> die (show err)
-  -- FIXME output the result
-  -- FIXME everything after this is hacky test stuff
-  let displayText :: Payload -> String
-      displayText (Byte n) = renderByte n
-      displayText (Ws ws) = ws
-  let debugPattern = intercalate "," . fmap (maybe "x" show)
-  putStrLn "LAYOUTS:"
-  forM_ unevald.layouts $ \(name, layout) -> putStrLn $ name ++ ": " ++ debugPattern layout.pattern
-  putStrLn "EXPRESSIONS:"
-  forM_ unevald.exprs $ \(name, e) -> putStrLn $ name ++ ": " ++ show e
-  putStrLn "VALUES:"
-  forM_ unpatched.values $ \(name, v) -> putStrLn $ name ++ ": " ++ show v
-  putStrLn "PATCHES:"
-  forM_ unpatched.patches $ \patch -> putStrLn $ show patch.offset ++ " <-(" ++ debugPattern patch.layout.pattern ++ ") " ++ show patch.expr
-  putStrLn "BODY:"
-  -- putStr $ concatMap displayText unevald.payload
-  -- putStrLn ">>>>>>>>>>>>"
-  putStr $ concatMap displayText patchedPayload
-  -- putStrLn "============"
-  -- print unevald
+  -- render the output
+  let rendered = if
+        | opts.isBinaryOutput -> concatMap (\case {Byte n -> byteToBin n; Ws _ -> ""}) patchedPayload
+        | otherwise -> concatMap (\case {Byte n -> renderByte n; Ws ws -> ws}) patchedPayload
+  -- write output to stdout/file
+  case opts.outputFile of
+    Just path -> if opts.isBinaryOutput
+      then writeBinaryFile path rendered
+      else writeFile path rendered
+    Nothing -> do
+      when (opts.isBinaryOutput) $ die "cowardly not printing binary to stdout (could mess up your terminal)"
+      putStr rendered
+
+data Arguments = Args
+  { outputFile :: Maybe FilePath
+  , isBinaryOutput :: Bool
+  , inputFiles :: [FilePath] -- TODO allow a way to specify stdin as an input
+  }
+  deriving (Show)
+
+defaultArgs :: Arguments
+defaultArgs = Args
+  { outputFile = Nothing
+  , isBinaryOutput = False
+  , inputFiles = []
+  }
+
+parseCliArgs :: [String] -> IO Arguments
+parseCliArgs = go defaultArgs
+  where
+  go args [] = pure args
+  go _ ("--help":_) = do
+    progName <- getProgName
+    mapM_ putStrLn
+      [ "Usage: " ++ progName ++ "[options] <FILES...>"
+      , "  Processes the input file in kiss-tools generic binary format, producing a linked binary file."
+      , ""
+      , "OPTIONS"
+      , "  --output FILE"
+      , "  -o FILE"
+      , "      write output to given file"
+      , ""
+      , "  --format FORMAT"
+      , "  -f FORMAT"
+      , "      produce output in either `text` or `binary`"
+      , "      default is text"
+      , ""
+      , "  -b | --bin"
+      , "    shortcut for `--format binary`"
+      , ""
+      , "  --help           display this help message"
+      ]
+    exitSuccess
+  -- options
+  go args (opt:opts) | opt `elem` ["-o", "--output"] = case opts of
+      [] -> die "missing output filepath"
+      path:rest -> go args{ outputFile = Just path } rest
+  go args (opt:opts) | opt `elem` ["-f", "--format"] = case opts of
+      [] -> die "missing output format (one of `text` or `binary`)"
+      ("text":rest) -> go args{isBinaryOutput = False} rest
+      ("binary":rest) -> go args{isBinaryOutput = True} rest
+      _ -> die "unrecognized format (try `text` or `binary`)"
+  go args (opt:rest) | opt `elem` ["-b", "--bin"] = go args{isBinaryOutput = True} rest
+  -- explicit end of options
+  go args ("--":rest) = pure args{ inputFiles = args.inputFiles ++ rest }
+  -- unrecognized options
+  go _ (('-':_):_) = die "unrecognized option"
+  -- input file
+  go args (path:rest) = go args{inputFiles = args.inputFiles ++ [path]} rest
+
 
 -- TODO do I read the payload into memory or write it to a file
 -- (and then patch before writing anything to disk, or write as I go and use fseek to patch?)
@@ -373,7 +443,7 @@ loadBase :: Int -> [Payload] -> Value
 loadBase = go 0
   where
   go !acc 0 _ = acc
-  go !acc !i (Byte x : rest) = go ((acc `shiftL` bitsPerByte) + intCast x) (i - 1) rest
+  go !acc !i (Byte x : rest) = go ((acc `shiftL` bitsPerByte) + castInt x) (i - 1) rest
   go !acc !i (_ : rest) = go acc i rest
   go !acc !i [] = go acc i (repeat $ Byte 0)
 
@@ -385,7 +455,7 @@ writePatch bs (other : rest) = other : writePatch bs rest
 
 patchValue :: Value -> Layout -> Value -> Value
 patchValue base layout value =
-  let spreadValue = fromBools 0 [maybe False (value `testBit`) p | p <- layout.pattern]
+  let spreadValue = fromBools 0 [maybe False (value `bitAt`) p | p <- layout.pattern]
       mask = fromBools 0 [isNothing p | p <- layout.pattern]
   in (mask .&. base) .|. spreadValue
   where
@@ -394,7 +464,7 @@ patchValue base layout value =
   fromBools acc (b:rest) = fromBools ((acc `shiftL` 1) + (if b then 1 else 0)) rest
 
 valueToBytes :: Layout -> Value -> [Byte]
-valueToBytes layout value = [intCast $ getByte i | i <- byteIxs]
+valueToBytes layout value = [castInt $ getByte i | i <- byteIxs]
   where
   getByte i = (value `shiftR` (i*bitsPerByte)) .&. lowByteMask
   byteIxs = reverse [0..layout.nBytes - 1]
@@ -587,7 +657,7 @@ parseTokens input = do
   revacc <- parseMany emptyAccum input parseToken
   pure revacc
     { payload = reverse revacc.payload
-    , patches = reverse revacc.patches -- so that patch points are in acending order by offset
+    , patches = reverse revacc.patches -- so that patch points are in ascending order by offset
     }
 
 parseToken :: Accum -> String -> Either LinkError (Accum, String)

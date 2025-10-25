@@ -1,11 +1,11 @@
 The KISS acronym has been transcribed a lot of ways,
   but I think the most accurate today it "keep it stupid simple".
 How simple should you keep it?
-Imagine an average mechanic, under fire, with just a handful of tools, who needs to repair a jet fighter; can they do it?
+Imagine an average mechanic, taking cover from weapons fire, with just a handful of tools, who needs to repair a jet fighter; can they do it?
 That's how simple the engineer has to keep it.
-The more intelligent and educated an engineer you are, the more difficult it is to meet this standard.
+The more clever an engineer you are, the more difficult it is to meet this standard.
 
-A modern development toolchain is incredibly complex.
+A modern development toolchain is written by incredibly clever people, and is accordinly extraordinarily complex.
 If you didn't already have access to a working C compiler, how would you compile gcc?, or clang?
 Is it an easy day's work to audit the codebase for any C compiler?
 What about more modern, more feature-packed languages?
@@ -27,7 +27,8 @@ There's something wonderful about making advanced tools out of basic tools.
 
 A set of development tools:
 - functional enough to support a self-hosting compiler for a full typed functional language
-- simple enough to hack on, and hand-compile where necessary
+- simple enough to hack on as a routine matter
+- simple enough to compile by hand
 - performant _enough_, just so you can't grab a cuppa every time you use them
 
 # An Approach
