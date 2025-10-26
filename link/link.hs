@@ -106,7 +106,7 @@ renderDigit :: Byte -> Char
 renderDigit b
   | b <= 9 = chr (ord '0' + castInt b)
   | 10 <= b && b <= 15 = chr (ord 'A' -10 + castInt b)
-  | otherwise = undefined
+  | otherwise = error "internal error"
 
 -- Converts our internal representation of a byte to something that can be written to a binary file.
 -- If the number of bits per digit for the file isn't a multiple of the target system's bits per byte (linking a 9-bit format on an 8-bit computer), you'll need to implement a bitstreaming algorithm.
@@ -276,7 +276,6 @@ emptyAccum = Accum
 -- ==========
 
 parseDirective :: Name -> String -> Accum -> Either LinkError Accum
-  -- FIXME more directives (pad, align, let)
 parseDirective "namespace" str0 acc = do
   ns <- case splitId str0 of
     Just (name, "") -> pure name
@@ -326,10 +325,51 @@ parseDirective "let" str0 acc = do
   let qualName = case name of
         ('.':_) -> acc.namespace ++ name
         _ -> name
-  e <- parseExpr acc.namespace str1
+  str2 <- case splitWs str1 of
+    Just (_, str2) -> pure str2
+    Nothing -> Left $ SyntaxError "expected whitespace after let-bound name" str1
+  e <- parseExpr acc.namespace str2
   pure acc
     { exprs = (qualName, e) : acc.exprs }
+-- TODO default padding directive?
+parseDirective "pad" str0 acc = do
+  (n, str1) <- case span (`inClass` "0-9") str0 of
+    ("", _) -> Left $ SyntaxError "missing number" str0
+    (nStr, str1) -> pure (read nStr, str1)
+  payload <- case splitWs str1 of
+    Nothing
+     | null str1 -> pure [Byte 0]
+     | otherwise -> Left $ SyntaxError "expecting whitespace after padding amount" str1
+    Just (_, "") -> pure [Byte 0]
+    Just (_, str2) -> parseBytes str2
+  pure $ insertPadding acc n payload
+parseDirective "align" str0 acc = do
+  (alignTo, str1) <- case span (`inClass` "0-9") str0 of
+    ("", _) -> Left $ SyntaxError "missing number" str0
+    (nStr, str1) -> pure (read nStr, str1)
+  payload <- case splitWs str1 of
+    Nothing
+     | null str1 -> pure [Byte 0]
+     | otherwise -> Left $ SyntaxError "expecting whitespace after alignment size" str1
+    Just (_, "") -> pure [Byte 0]
+    Just (_, str2) -> parseBytes str2
+  pure $ case acc.offset `divMod` alignTo of
+    (_, 0) -> acc
+    (_, n) -> insertPadding acc (alignTo - n) payload
 parseDirective name _ _ = Left $ UnknownDirective name
+
+insertPadding :: Accum -> Int -> [Payload] -> Accum
+insertPadding acc0 n0 payload0 = go acc0 n0 (cycle payload0)
+  where
+  go acc 0 _ = acc
+  go acc !n (Byte b:rest) =
+    let acc' = acc
+          { offset = acc.offset + 1
+          , payload = Byte b : acc.payload
+          }
+     in go acc' (n - 1) rest
+  go acc !n (Ws ws:rest) = go acc{payload = Ws ws : acc.payload} n rest
+  go _ _ [] = error "internal error"
 
 -- Layouts
 -- =======
@@ -405,14 +445,6 @@ parsePatch ns inner = case strtok ';' inner of
   parseLayoutName str = case splitId (trim str) of
     Just (name, "") -> pure name
     _ -> Left $ SyntaxError "expected layout name" str
-  parseBytes str = fmap reverse $ parseMany [] str $ \bytes input -> if
-    -- plain byte
-    | Just (byte, rest) <- splitByte input
-    -> pure (Byte byte : bytes, rest)
-    -- whitespace
-    | Just (ws, rest) <- splitWs input
-    -> pure (Ws ws : bytes, rest)
-    | otherwise -> Left $ SyntaxError "unexpected tokens in patch base" input
 
 runPatch :: Accum -> Either LinkError [Payload]
 runPatch accum = go 0 accum.patches accum.payload
@@ -721,6 +753,16 @@ parseToken acc input = if
   -- syntax error
   | otherwise
   -> Left $ SyntaxError "bad token" input
+
+parseBytes :: String -> Either LinkError [Payload]
+parseBytes str = fmap reverse $ parseMany [] str $ \bytes input -> if
+  -- plain byte
+  | Just (byte, rest) <- splitByte input
+  -> pure (Byte byte : bytes, rest)
+  -- whitespace
+  | Just (ws, rest) <- splitWs input
+  -> pure (Ws ws : bytes, rest)
+  | otherwise -> Left $ SyntaxError "unexpected tokens in patch base" input
 
 -- Support
 -- =======

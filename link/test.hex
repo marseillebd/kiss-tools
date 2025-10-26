@@ -2,6 +2,7 @@
 :defaultLayout le
 01 02
   03 # comment
+:align 8 FF
 {@}
 {@@}
 somevals:
@@ -13,6 +14,9 @@ somevals:
   {256}
   {266}
 end: {end - somevals}
+
+:pad 4 FE
+:align 6 FF
 
 :namespace strtab
 {.nstrs} # length of strtab in entries
