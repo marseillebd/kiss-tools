@@ -24,3 +24,4 @@ vmResult vmStep();
 int vmExitCode();
 
 #endif
+

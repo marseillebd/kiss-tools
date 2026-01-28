@@ -78,6 +78,15 @@ int vmExitCode() {
   _it; \
 })
 
+// 6-bit zero-extended:  0b00xxxxxx
+// 6-bit one-extended:   0b01xxxxxx
+// 8-bit:                0b10000001 <1 byte>
+// 16-bit little-endian: 0b10000001 <2 bytes>
+// 32-bit little-endian: 0b10000010 <4 bytes>
+// 64-bit little-endian: 0b10000011 <8 bytes>
+// other immediate value byte patterns are reserved
+// not all immediate values will be supported byt all implementations
+// at least the 6-bit encodings and the word-size encoding should be, though
 #define IMM() DO(imm)
 static
 word imm(vmResult *r) {
