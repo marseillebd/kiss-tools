@@ -1,5 +1,11 @@
 /* compile with:
-gcc -std=c11 -pedantic -Wall vm.c -o vm
+gcc -std=c11 -pedantic -Wall vm.c
+
+a good way to create an input file (for now) is to use xxd:
+edit sample-bytecode.hex, then
+xxd -r sample-bytecode.hex | tee sample-bytecode.bin | xxd
+inspect the result on stdout, and if ok, then
+./a.out sample-bytecode.bin
 */
 
 // Try for as long as possible to just keep everything inside this file.
@@ -28,21 +34,106 @@ gcc -std=c11 -pedantic -Wall vm.c -o vm
 #include <assert.h>
 _Static_assert(CHAR_BIT == 8, "assume an 8-bit byte");
 
-/////////////////////////
-////// Interpreter //////
-/////////////////////////
+//////////////////////////////////////////
+////// Virtual Machine Architecture //////
+//////////////////////////////////////////
 
 typedef union {
   uint32_t u;
   int32_t i;
+  size_t codesize;
 } word_t;
 
-word_t imm32(char* bc) {
+// so, the bytecode is big-endian
+word_t be32(uint8_t* bc) {
   uint32_t bits = (uint32_t)bc[0] << 8*3
                 | (uint32_t)bc[1] << 8*2
                 | (uint32_t)bc[2] << 8*1
                 | (uint32_t)bc[3] << 8*0;
   return (word_t){ .u = bits };
+}
+
+// 16 registers are addressable by 4 bits, so a byte can hold two operands
+// if compiling the vm code to native code, it's a small enough section of memory to reserve (16*4 = 64 bytes)
+word_t vmregs[16];
+// conventions:
+// - all registers are caller-save
+// - r16 is a link register: it is set on call instructions (and should therefore be saved when it's not a tail-call).
+// - function.result possibilities:
+//   - slow call: all arguments and results are on the stack
+//   - use registers: r1, r2 for results, r3-r15 for arguments, arg/rets larger than 2 words are by-reference, extra ret/args are on the stack
+
+size_t ip; // instruction pointer
+
+// a stack, grows upwards
+size_t sp;
+word_t stack[16*1024/4]; // TODO hardcoded to be 16kiB for now
+
+// an unstructured heap
+char heap[2*1024*1024]; // TODO hardcoded to be 2MiB for now
+
+// instruction ROM
+uint8_t* code;
+
+/////////////////////////
+////// Interpreter //////
+/////////////////////////
+
+#define FOR_OP(X) \
+  X(hlt, 0, NULL) \
+  X(imm32, 2, NULL) \
+  X(imm8, 3, NULL) \
+  X(out, 255, NULL) \
+  X(in, 254, NULL) \
+  // TODO sext byte to word, or perhaps have some better masking/extending/blitting ops
+
+#define MK_ENUM(name, code, ...) \
+  OP_##name = code,
+
+enum Op {
+  FOR_OP(MK_ENUM)
+};
+
+word_t imm8() {
+  // TODO check that we aren't out of bounds for the code
+  return (word_t){ .u = code[ip++] };
+}
+
+word_t imm32() {
+  // TODO check that we aren't out of bounds for the code
+  word_t out = be32(&code[ip]);
+  ip += 4;
+  return out;
+}
+
+word_t pop() {
+  assert(sp >= 1); // check for stack underflow
+  return stack[--sp];
+}
+
+void push(word_t val) {
+  assert(sp < sizeof(stack)/sizeof(word_t)); // check for stack overflow
+  stack[sp++] = val;
+}
+
+bool cycle() {
+  switch (code[ip++]) {
+    case OP_hlt: { return true; }
+    case OP_imm8: { push(imm8()); } break;
+    case OP_imm32: { push(imm32()); } break;
+    case OP_out: { fputc(pop().u, stdout); } break;
+  }
+  return false;
+}
+
+_Noreturn
+void execute() {
+  bool shouldStop;
+  do {
+    fprintf(stderr, "ip=%zxh, op=%i\n", ip, code[ip]); // DEBUG
+    shouldStop = cycle();
+  } while (!shouldStop);
+  exit(pop().u);
 }
 
 ////////////////////
@@ -53,10 +144,12 @@ struct VmHeader {
   int version[3];
   int bytesize; // in bits
   int wordsize; // in bits
-  // TODO might add heapsize, stacksize, codesize
+  size_t codesize; // in bytes
+  // TODO might add heapsize, stacksize
 };
 bool parseHeader(FILE* fp, struct VmHeader /*out*/*hdr) {
   int nscanned;
+
   // 8-byte magic string and version info: /ksvm\d{3}\n/
   nscanned = fscanf(fp, "ksvm%1d%1d%1d",
       &hdr->version[0], &hdr->version[1], &hdr->version[2]);
@@ -71,6 +164,7 @@ bool parseHeader(FILE* fp, struct VmHeader /*out*/*hdr) {
         hdr->version[0], hdr->version[1], hdr->version[2]);
     return false;
   }
+
   // bits per byte and per word
   nscanned = fscanf(fp, "%2dx%4d",
       &hdr->bytesize, &hdr->wordsize);
@@ -85,9 +179,18 @@ bool parseHeader(FILE* fp, struct VmHeader /*out*/*hdr) {
         hdr->bytesize, hdr->wordsize);
     return false;
   }
+
+  // the rest of the header describes the bytecode payload
+  uint8_t sizes[16];
+  nscanned = fread(&sizes, 1, 16, fp);
+  assert(nscanned == 16);
+  // first 3 32bit words are reserved
+  // last 32bit word is the size of the bytecode
+  hdr->codesize = be32(sizes + 12).u;
+
+  // everything is loaded
   return true;
 }
-
 
 int main(int argc, char* argv[argc]) {
   // parse arguments/aquire system resources
@@ -102,26 +205,21 @@ int main(int argc, char* argv[argc]) {
     fprintf(stderr, "malformed bytecode file: %s\n", argv[1]);
     return 1;
   }
-  printf("v%i.%i.%i, %ix%i\n", //DEBUG
-      hdr.version[0], hdr.version[1], hdr.version[2],
-      hdr.bytesize, hdr.wordsize);
+  // printf("v%i.%i.%i, %ix%i\n%zu\n", //DEBUG
+  //     hdr.version[0], hdr.version[1], hdr.version[2],
+  //     hdr.bytesize, hdr.wordsize,
+  //     hdr.codesize);
 
   // load bytecode
-  size_t codesize; {
-    long cur = ftell(fp); assert(cur >= 0);
-    fseek(fp, 0, SEEK_END); // TODO error checking
-    long eof = ftell(fp); assert(eof >= 0);
-    fseek(fp, cur, SEEK_SET); assert(cur >= 0);
-    codesize = eof - cur;
-  }
-  char* bytecode = malloc(codesize);
-  assert(bytecode);
-  size_t nread = fread(bytecode, 1, codesize, fp);
-  assert(nread == codesize);
+  code = malloc(hdr.codesize);
+  assert(code);
+  size_t nread = fread(code, 1, hdr.codesize, fp);
+  assert(nread == hdr.codesize);
 
-  // TODO begin execution
-  printf("an integer: 0x%.8x\n", imm32(bytecode).u);
-  return 0;
+  // begin execution
+  ip = 0;
+  sp = 0;
+  execute();
 }
 
 
