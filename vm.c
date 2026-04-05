@@ -79,13 +79,101 @@ uint8_t* code;
 ////// Interpreter //////
 /////////////////////////
 
+/*
+So, I'm still thinking about the bytecode design.
+
+OnRamp vm gets away with just 16 opcodes (one of them is a syscall and can do a lot (incl exit, fopen/tell/seek/read/write/close, and a lot more I think).
+I don't think I want to support as many bits of the OnRamp syscalls, but its opcides look very nice.
+Every instr is 4 bytes (very nice for alignment/decoding): 1 op + 3 args
+- opcodes are in the range 70-7F
+  - add, sub, mul, div (signed or unsigned?), and, or, shl, shru, ldw, stw, ims (16bits of immediate), ldb, jz, ltu
+- arguments mostly are split into three groups:
+  - non-neg immediates are 00-7f
+  - registers (16 of them) are 80-8f
+  - negative immediates are 90-ff
+- load immediate takes a register as arg1, and args2+3 are 16 bits; arg1 is shifted up and the 16bit imm is put in the low bits
+- there's only one control flow: jz relative addr
+- CON: there's no stack
+- CON: loads of wasted space in the opcodes; lacks computed jumps, carry arithmetic is missing, conditional moves might be nice, no call/ret
+
+The 6502 has 56 instructions, though many are different in that they target different registers:
+- ld, st, mov
+- push/pop the stack to/from regs
+- and, xor, or, bit(test)
+- add/sub(with carry only), cmp
+- inc/dec (which I don't need)
+- asl, lsr, ror, rol
+- jmp, jsr, rts (ret)
+- branch on {carry, zero, negative, overflow} is {set, clear}
+- clear/set some status flags
+- nop and brk/rti for interrupts
+The constant use of the carry flagg+ops makes sense with an 8-bit machine trying to do 16/32-bit arith. Unneeded for me.
+
+Takeaways so far are: I _can_ get away with a lot less that I'd expect, if I have some form of addressing mode rather than just pure stack operations.
+That said, I'm still favoring having a stack addressing mode for implementing expression evaluation and argument passing.
+Also, an auto-increment (prolly not auto-decrement) mode for memory addresses would be nice.
+
+RiscV:
+- add, and, or, xor
+- shl, shrl, shra (shifts)
+- stli{,u} (a bit oddball), lui, auipc
+- slt{,u} (set when less than)
+- jal (jump and link), jalr
+- b{eq,ne,lt,gt,ltu,gtu,ge,le,geu,leu}
+- {l,s}{w,h,hu,b,bu}
+- fence (for synchronization barriers)
+- ecall, ebreak (for system stuff)
+- mul, div, rem with the M extension
+There are a bunch of pseudo instructions:
+  - nop is just add zero with zero and then place in the zero register (which I don't have)
+  - mov is just add with zero
+  - not is just xor with -1
+  - j is just jal storing the link in the zero register (which I don't have, again)
+
+So, here's my idea:
+1-byte opcode + 3x 1-byte arguments, the arguments are given by addressing modes:
+- 00-7f are 7 bits of zero-extended immediate mode
+- 70-8f are register mode `register[i]`
+- 90-9f are register auto-increment mode `register[i]++`
+- a0-af are special modes
+  - a0: zero register `0` and ignore writes
+  - a1: push stack `stack[sp++]`
+  - a2-ae: UNASSIGNED, perhaps just auto-decrement, or `stack[sp-i]`
+  - ae: peek stack `stack[sp-1]`
+  - af: pop stack `stack[--sp]`
+- c0-ff are 6 bits of sign-extended immmediate mode
+So, we've got space for 256 opcodes:
+- add, sub, mul, divu
+- adc, sbb, mulc, modu (the mulc and modu just load from the carry register set by add/sub/mul/div, so I'd have to think about it)
+- and, or, xor
+- shl, shrl, shra
+- bit(test), mask (zero, except set bits from a2 to a3 inclusive)
+- ldw, stw, ldb, stb
+- jal, jalc
+  - jal dst, imm16: takes a 16-bit signed immediate that relative to the ip, saves ip into dst
+  - jalc dst, src, ign: saves ip into dst and jumps to src
+  - ret = jalc zeroReg, savedIp
+  - ldpc dst = jal dst, 0
+- branch, where the low 3 bits specify a gt/eq/lt mask, so mask 111 would be unconditional, mask 010 is on zero, mask 110 would be gte
+- cmpi, cmpu: sets up for a branch
+- imm (the src args combine to just be a 16-bit immediate)
+- brk/hlt, swi
+And this still leaves plenty of room for more advanced opcodes:
+- dup, swap, drop stack
+- popcount, count {lead,tral}ing {zero,one}s, bit-implies, max/min/clamp, lea, conditional moves, bit and byte swaps, fused multiply-add, perhaps even floating point
+- to/from utf8
+
+*/
+
 #define FOR_OP(X) \
   X(hlt, 0, NULL) \
+  X(swi, 1, NULL \
   X(imm32, 2, NULL) \
   X(imm8, 3, NULL) \
   X(out, 255, NULL) \
   X(in, 254, NULL) \
   // TODO sext byte to word, or perhaps have some better masking/extending/blitting ops
+// TODO: more opcodes
 
 #define MK_ENUM(name, code, ...) \
   OP_##name = code,
