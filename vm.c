@@ -165,6 +165,102 @@ And this still leaves plenty of room for more advanced opcodes:
 
 */
 
+/*
+
+Instruction Formats:
+- all instructions are 32-bit, organized into one byte of opcode and up to three argument bytes
+- `src/dst` arguments are one-byte and follow the addressing modes (below)
+- `imm16` is a single 16-bit immediate argument
+- `r` is like `src/dst`, but must be a register or stack mode
+
+Addressing Modes:
+
+Operation Codes:
+- Data transfer instructions are 00-1F.
+  - 00 is an invalid instruction, because it's such an easy thing to accidentily run into
+  - `imm{,i} dst, imm16` are zero-/sign-extended "load" immediates. They actually shift the dst left 16 bits and place the immediate into the 16 low bits.
+  - `{dup,drop,swap}` are just Forth-like stack manipulations. TODO these probably could take an imm8 that specified depth in the stack
+  - `{ld,st}{w,b} r, src, src` are load/store word/byte. The memory address is the sum of the two src operands.
+  - `mov dst, src` is just `add dst, src, 0`
+- Arithmetic and Logical instructions are 20-4F, maybe even 5F.
+  - `20-27 dst, src, src` are ordinary arithmetic instructions.
+    `cmp dst, a, b` sets `dst[0..2]` to `[a==b,a>b,a<b]`, which is useful in the conditional branch instructions.
+    `neg dst, src` === `sub dst, 0, src`
+  - `28-2F` are for high-precision arithmetic.
+    Whenever an arithmetic instruction (add,sub,mul,div,adc,sbb) happens, a hidden overflow register is set with the overflow/underflow/modulus.
+    This register is used for `adc,sbb`, ofc, and it can be transferred directly to a dst with `hml/mod` for "high result of multiply" and "modulus".
+  - `30-37 dst, src, src` are for bitwise operations.
+    `inv dst, src` === `xor dst, src, -1`.
+  - `38-3F` are for bit manipulation functions.
+    - `bit dst, src1, src2` sets dst to 1 if src1's src2th bit is set, or zero otherwise
+    - `blit dst, src1, src2` mix bits from src1 and src2 if the dst bit is zero or one (respectively)
+    - `mask dst, src, src` clears the destination and then sets the bits between (inclusive) the two sources (which should be in low-to high order).
+    - logical/arithmetic shift left, shift right, and rotate left/right are exactly what you'd think
+  - `40-47` are for "sideways" bit operations
+    - `c{t,l}{z,s} dst, src` are count trailing/leading zero/set bits
+    - `pcnt dst, src` counts set bits
+    - `{bswp,bitr} dst, src` swaps/reverses the order of bytes/bits in a word, respectively
+  - `58-5F` are currently unused, but expected to be ALU instructions
+- `60-6F` are system operations
+  - `{in,out} dst/src` are for character I/O. They create a whole word at a time, so can be used for ASCII or unicode, depending on the platform, and still have room for -1 to indicate end of file.
+  - `brk` returns control back to the system/debugger. Without a debugger, it is expected to halt.
+  - `swi` is "software interrupt, the details of which are to be worked out later.
+- `70-7F` are for control flow
+  - `70-77 src, imm16` are jumps.
+    Generally, the low three bits of the src and opcode are anded, and if non-zero, the signed imm16 is added to the instruction pointer.
+    `77` is an unconditional jump, even if the src is zero. Note that `70` would never jump, so it's a no-op.
+  - `jal src, imm16` is a "jump and link` also known as a "call". The current ip (just after the instr) is saved in r16.
+  - `jalc dst, src` is a compuled jump and link, saving the current ip in dst and jumping to the absolute address in src.
+  - Since the codesize is not expected to be huge, I suspect jal will be able to execute any valid jump, but just in case, there's also the absolute one.
+That's 53 opcodes in the low half, leaving 75 unallocated. Architectures like the 8086, 6502, and RiscV-IM are plenty functional with this many instrs or fewer.
+I may add bitwise implies, a fused mul-add (just for running totals), perhaps an `lea`-type instruction.
+There's even the possibility of having memcpy/move as part of the instruction set, since it's so well-used and it'd be a bit silly to implement it inside the vm.
+Similar string operations, like setting to zero or strcmp might come into play as well.
+There's an outside possibility that I take the `mux` instruction from MMIX, but that might be a bit heavyweight to implement in the basic set.
+
+Advanced/Optional Operation Codes:
+Instructions 80 and above are optional.
+I suppose there'd need to be an extensions bitfield in the header for them.
+I haven't quite worked out what should go here, on account of not having the basic opcodes implemented.
+Nevertheless, they may consist of floating-point, extra comparisons, conditional instructions, utf8, some extra system calls (filling out libc/posix a bit more), and perhaps bcd.
+
+|     | +0        | +1   | +2       | +3     | +4    | +5     | +6       | +7      |
+| --- | --------- | ---- | -------- | ------ | ----- | ------ | ------   | ------- |
+| 00  | (invalid) |      | imm      | immi   |       |        |          |         |
+| 08  | dup       | drop | swap     |        |       |        |          |         |
+| 10  | ldw       | ldb  | stw      | stb    |       |        |          |         |
+| 18  |           |      |          |        |       |        |          |         |
+| 20  | add       | sub  | mul      | muli   | div   | divi   | cmp      | cmpi    |
+| 28  | adc       | sbb  |          |        |       |        | hmul/mod |         |
+| 30  | xor       | or   | and      |        |       |        |          |         |
+| 38  | bit       | blit | mask     | shl    | lshr  | ashr   | rotr     | rotl    |
+| 40  | ctz       | cts  | clz      | cls    | pcnt  |        | bswp     | bitr    |
+| 48  |           |      |          |        |       |        |          |         |
+| 50  |           |      |          |        |       |        |          |         |
+| 58  |           |      |          |        |       |        |          |         |
+| 60  | in        | out  |          |        |       |        | brk      | swi     |
+| 68  |           |      |          |        |       |        |          |         |
+| 70  | (nop)     | jgt  | jeq      | jge    | jlt   | jne    | jle      | j       |
+| 78  | jal       | jalc |          |        |       |        |          |         |
+| 80  |           |      |          |        |       |        |          |         |
+| 88  | utf8...   |      |          |        |       |        |          |         |
+| 90  |           |      |          |        |       |        |          |         |
+| 98  |           |      |          |        |       |        |          |         |
+| A0  | floats... |      |          |        |       |        |          |         |
+| A8  |           |      |          |        |       |        |          |         |
+| B0  |           |      |          |        |       |        |          |         |
+| B8  |           |      |          |        |       |        |          |         |
+| C0  | bcd...    |      |          |        |       |        |          |         |
+| C8  | min       | mini | max      | maxi   | clamp | clampi | bounds   | boundsi |
+| D0  |           |      |          |        |       |        |          |         |
+| D8  |           |      |          |        |       |        |          |         |
+| E0  |           |      |          |        |       |        |          |         |
+| E8  |           |      |          |        |       |        |          |         |
+| F0  |           |      |          |        |       |        |          |         |
+| F8  |           |      |          |        |       |        |          |         |
+
+*/
+
 #define FOR_OP(X) \
   X(hlt, 0, NULL) \
   X(swi, 1, NULL \
