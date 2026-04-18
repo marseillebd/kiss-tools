@@ -63,6 +63,9 @@ word_t vmregs[16];
 //   - slow call: all arguments and results are on the stack
 //   - use registers: r1, r2 for results, r3-r15 for arguments, arg/rets larger than 2 words are by-reference, extra ret/args are on the stack
 
+word_t regs[16]; // general-purpose registers
+
+size_t _codesize; // just for assertions
 size_t ip; // instruction pointer
 
 // a stack, grows upwards
@@ -75,9 +78,9 @@ char heap[2*1024*1024]; // TODO hardcoded to be 2MiB for now
 // instruction ROM
 uint8_t* code;
 
-/////////////////////////
-////// Interpreter //////
-/////////////////////////
+/////////////////////////////
+////// Instruction Set //////
+/////////////////////////////
 
 /*
 So, I'm still thinking about the bytecode design.
@@ -174,6 +177,19 @@ Instruction Formats:
 - `r` is like `src/dst`, but must be a register or stack mode
 
 Addressing Modes:
+- `src/dst` arguments are an 8-bit encoding representing several location formats:
+  - 00-7F are 7 bits of zero-extended immediate mode
+  - 80-8F are register mode `register[i]`
+  - 90-9F are register auto-increment mode `register[i]++`
+  - A0-AF are special modes
+    - A0: push stack `stack[sp++]`
+    - A1-AE: peek stack at depth 1-14 (one-indexed, because sp points just above the stack)
+    - AF: pop stack `stack[--sp]`
+  - B0-BF: UNASSIGNED, perhaps useful for conditional transfers?
+  - C0-FF are 6 bits of sign-extended immmediate mode
+- attempting to write to an immediate src/dst just drops the write, which means src/dst = 0 also acts like a zero-register
+- `r` format is like src/dst, but must encode a register
+- `imm16` is a single 16-bit unsigned immediate, big-endian
 
 Operation Codes:
 - Data transfer instructions are 00-1F.
@@ -203,7 +219,8 @@ Operation Codes:
   - `58-5F` are currently unused, but expected to be ALU instructions
 - `60-6F` are system operations
   - `{in,out} dst/src` are for character I/O. They create a whole word at a time, so can be used for ASCII or unicode, depending on the platform, and still have room for -1 to indicate end of file.
-  - `brk` returns control back to the system/debugger. Without a debugger, it is expected to halt.
+  - `hlt/brk _, src, src` returns control back to the system/debugger. Without a debugger, it is expected to halt.
+    the dst field is ignored, the first source is an exit code and the second is a code for the debugger
   - `swi` is "software interrupt, the details of which are to be worked out later.
 - `70-7F` are for control flow
   - `70-77 src, imm16` are jumps.
@@ -238,7 +255,7 @@ Nevertheless, they may consist of floating-point, extra comparisons, conditional
 | 48  |           |      |          |        |       |        |          |         |
 | 50  |           |      |          |        |       |        |          |         |
 | 58  |           |      |          |        |       |        |          |         |
-| 60  | in        | out  |          |        |       |        | brk      | swi     |
+| 60  | in        | out  |          |        |       |        | brk/hlt  | swi     |
 | 68  |           |      |          |        |       |        |          |         |
 | 70  | (nop)     | jgt  | jeq      | jge    | jlt   | jne    | jle      | j       |
 | 78  | jal       | jalc |          |        |       |        |          |         |
@@ -262,12 +279,11 @@ Nevertheless, they may consist of floating-point, extra comparisons, conditional
 */
 
 #define FOR_OP(X) \
-  X(hlt, 0, NULL) \
-  X(swi, 1, NULL \
-  X(imm32, 2, NULL) \
-  X(imm8, 3, NULL) \
-  X(out, 255, NULL) \
-  X(in, 254, NULL) \
+  X(hlt, 0x66, NULL) \
+  X(swi, 0x67, NULL) \
+  X(imm, 0x02, NULL) \
+  X(in, 0x60, NULL) \
+  X(out, 0x61, NULL) \
   // TODO sext byte to word, or perhaps have some better masking/extending/blitting ops
 // TODO: more opcodes
 
@@ -295,29 +311,87 @@ word_t pop() {
   return stack[--sp];
 }
 
+word_t peekAt(uint8_t depth) {
+  assert(sp >= depth); // check for stack underflow
+  return stack[sp - depth];
+}
+word_t peek() { return peekAt(1); }
+
 void push(word_t val) {
   assert(sp < sizeof(stack)/sizeof(word_t)); // check for stack overflow
   stack[sp++] = val;
 }
 
+word_t src(uint8_t operand) {
+  if (operand <= 0x7F) { // 7-bit zero-ext immediate
+    assert (0 <= operand);
+    return (word_t){.u = operand & 0x7F};
+  }
+  else if (operand <= 0x9F) { // register
+    assert(operand <= 0x9F);
+    word_t val = regs[operand & 0x0F];
+    if (0x90 <= operand) { // auto-increment
+      regs[operand & 0x0F].u++;
+    }
+    return val;
+  }
+  else if (operand <= 0xAF) { // stack
+    assert (0xA0 <= operand)
+    if (operand == 0xA0) { // push, which is not a valid src
+      assert(false);
+      return (word_t){.u=0};
+    }
+    else if (operand <= 0xAE) { // peek stack at depth 1-14 (one-indexed)
+      return peekAt(operand & 0x0F);
+    }
+    else { assert(operand == 0xAF);
+      return pop();
+    }
+  }
+  else if (operand <= 0xBF) { // UNUSED, maybe useful for conditional moves?
+    assert(false); return (word_t){.u=0};
+  }
+  else { // 6-bit one-ext immediate (so, negative)
+    // note that 0xFF is immediate -1
+    assert(0xC0 <= operand);
+    assert(operand <= 0xFF);
+    uint8_t val = (int8_t)(0xC0 | (operand & 0x3F));
+    // ^ just paste together the low six bit of the operand with a couple ones, and let C promote later
+    return (word_t){.u = val};
+  }
+}
+
+/////////////////////////
+////// Interpreter //////
+/////////////////////////
+
+uint8_t _exitCode = 0;
 bool cycle() {
-  switch (code[ip++]) {
-    case OP_hlt: { return true; }
-    case OP_imm8: { push(imm8()); } break;
-    case OP_imm32: { push(imm32()); } break;
-    case OP_out: { fputc(pop().u, stdout); } break;
+  // fetch
+  assert(ip + 4 <= _codesize);
+  uint8_t opcode = code[ip++];
+  uint8_t a = code[ip++];
+  uint8_t b = code[ip++];
+  uint8_t c = code[ip++];
+  fprintf(stderr, "ip=%zxh, op=%xh\n", ip, opcode); // DEBUG
+  // decode TODO
+  // execute
+  switch (opcode) {
+    case OP_hlt: { _exitCode = src(b).u; } return true;
+    case OP_out: {
+      fputc(src(a).u, stdout);
+    } break;
   }
   return false;
 }
 
 _Noreturn
-void execute() {
+void cycles() {
   bool shouldStop;
   do {
-    fprintf(stderr, "ip=%zxh, op=%i\n", ip, code[ip]); // DEBUG
     shouldStop = cycle();
   } while (!shouldStop);
-  exit(pop().u);
+  exit(_exitCode);
 }
 
 ////////////////////
@@ -399,11 +473,12 @@ int main(int argc, char* argv[argc]) {
   assert(code);
   size_t nread = fread(code, 1, hdr.codesize, fp);
   assert(nread == hdr.codesize);
+  _codesize = hdr.codesize;
 
   // begin execution
   ip = 0;
   sp = 0;
-  execute();
+  cycles();
 }
 
 
