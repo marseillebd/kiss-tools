@@ -80,14 +80,14 @@
 
   # if (c <= '9') return c - '0', true
   80 39 A1    ; dup '9' sub    # c --- c c-'9'
-  05 B6       ; jgt(+5)        # c c-'9' --- c
+  05 B4       ; jgt(+5)        # c c-'9' --- c
   80 30 A1    ; dup '0' sub    # c --- c b
   01 B8       ; 1 ret          # c b --- c b true
 @0045
 
   # if (c >= 'a') c -= ('a' - 'A')
   80 61 A1    ; dup 'a' sub    # c --- c c-'a'
-  02 B3       ; jlt(+2)        # c c-'a' --- c/c.upper
+  02 B1       ; jlt(+2)        # c c-'a' --- c/c.upper
   20 A1       ; 32 sub         # c --- c.upper
 
   # if (c < 'A') return false
@@ -98,7 +98,7 @@
 
   # if (c > 'F') return false
   80 46 A1    ; dup 'F' sub    # c --- c c-'F'
-  03 B6       ; jge(+3)        # c c-'F' --- c
+  03 B3       ; jle(+3)        # c c-'F' --- c
   FF 00 B8    ; ret(0, -1)     # c --- c _ false
 
   # return c - 'A' + 10, true

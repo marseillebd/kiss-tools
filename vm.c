@@ -467,6 +467,7 @@ bool cycle() {
     case OP_out: {
       uint8_t byte = pop().u & 0xFF;
       fputc(byte, stdout);
+      fflush(stdout); // DEBUG
     } break;
     case OP_swi: {
       uint32_t syscode = pop().u;
@@ -489,6 +490,7 @@ void cycles() {
   do {
     shouldStop = cycle();
   } while (!shouldStop);
+  tracef("ec: %d\n", _exitCode);
   exit(_exitCode);
 }
 
