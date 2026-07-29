@@ -1,0 +1,51 @@
+@0 main
+  @0 main.loop
+    0E?(ldior)1
+
+    8410 0042(@main.loop.end - $$)    @6
+    F023(#) 8910 F001 4002
+    F03B(;) 8910 F001 4022
+    F040(@) 8910 F001 4022
+    8120 000A(@main.nonComment - $$)  @22 34dec
+      9000 0000_0050(@skipLine)
+      8000 002C(@main.loop - $$)      @2C 44dec
+    @2C main.nonComment
+    F020(' ') 8910 9000 FFCE(@main.loop - $$)  @32 50dec
+
+    9000 0000_0070(@fromHex)
+    0442
+    0E?(ldior)2
+    9010 0000_0070(@fromHex)
+    4121
+
+    0F?(stior)1
+    9000 FFB8(@main.loop - $$)        @48 72dec
+  @48 main.loop.end
+  9600
+
+0000 0000 0000
+
+@50 skipLine
+
+  0E?(ldior)1
+  8410 000C(@skipLine.return - $$)   @56
+  F00A(\n) 8910 8400 0004(@skipLine.return - $$)  @5E
+  9000 FFEE(@skipLine - $$)          @62
+  @62 skipLine.return
+  9200
+
+0000 0000 0000 0000 0000 0000
+
+@70 fromHex
+  F030('0') 8C10 9601
+  F039('9') 8A10 9000 0006(fromHex.alpha - $$)  @7E
+  F030('0') 4101
+  9200
+  @84 fromHex.alpha
+  F046('F') 8B10
+    F020('a' - 'A') 5101
+
+  F041('A') 8C10 9601
+  F046('F') 8B10 9601
+  F037('a' - 10) 5101
+  9200

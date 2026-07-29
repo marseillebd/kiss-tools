@@ -200,7 +200,7 @@ There are roughly three instruction formats:
   X(jge, 0xB6, NULL) \
   X(j,   0xB7, NULL) \
   X(ret, 0xB8, NULL) \
-  X(slp, 0xB9, NULL) \
+  X(xlp, 0xB9, NULL) \
   X(pop, 0xBA, NULL) \
   X(xch, 0xBB, NULL) \
   X(ld,  0xA4, NULL) \
@@ -428,7 +428,7 @@ bool cycle() {
       push((word_t){ .u = addr + 1 });
     } break;
     // Special Transfers //
-    case OP_slp: { // Swap Link Pointer
+    case OP_xlp: { // Swap Link Pointer
       int oldLink = lp;
       int newLink = pop().i;
       push((word_t){ .i = oldLink });
