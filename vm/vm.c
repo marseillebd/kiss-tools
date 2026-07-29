@@ -1,6 +1,9 @@
 /* compile with:
 gcc -std=c11 -pedantic -Wall vm.c
 
+use -DNDEBUG to turn off asserts
+use -DNTRACE to turn off execution traces
+
 a good way to create an input file (for now) is to use xxd:
 edit sample-bytecode.hex, then
 xxd -r sample-bytecode.hex | tee sample-bytecode.bin | xxd
@@ -33,6 +36,12 @@ inspect the result on stdout, and if ok, then
 #include <stdint.h>
 #include <assert.h>
 _Static_assert(CHAR_BIT == 8, "assume an 8-bit byte");
+
+#ifndef NTRACE
+  #define tracef(...) fprintf(stderr, __VA_ARGS__)
+#else
+  #define tracef(...) ((void)0)
+#endif
 
 //////////////////////////////////////////
 ////// Virtual Machine Architecture //////
@@ -220,31 +229,38 @@ enum Op {
 };
 
 word_t imm32() {
-  // TODO check that we aren't out of bounds for the code
+  assert(ip + 4 < _codesize); // check in bounds of code
   word_t out = be32(&code[ip]);
+  tracef("imm32 = %X\n", out.u);
   ip += 4;
   return out;
 }
 
 word_t pop() {
   assert(sp >= 1); // check for stack underflow
-  return stack[--sp];
+  word_t out = stack[--sp];
+  tracef("pop = %X\n", out.u);
+  return out;
 }
 
 word_t peekAt(uint8_t depth) {
   assert(sp >= depth); // check for stack underflow
-  return stack[sp - depth];
+  word_t out = stack[sp - depth];
+  tracef("peek stack[%d] = %X\n", depth, out.u);
+  return out;
 }
 word_t peek() { return peekAt(1); }
 
 void saveAt(word_t val, uint8_t depth) {
   assert(sp >= depth); // check for stack underflow
   assert(depth >= 1); // use `push` to actually extend the stack
+  tracef("set stack[%d] = %X\n", depth, val.u);
   stack[sp - depth] = val;
 }
 
 void push(word_t val) {
   assert(sp < sizeof(stack)/sizeof(word_t)); // check for stack overflow
+  tracef("push %X\n", val.u);
   stack[sp++] = val;
 }
 
@@ -255,10 +271,10 @@ void push(word_t val) {
 uint8_t _exitCode = 0;
 bool cycle() {
   // fetch
-  if (!(ip < _codesize)) { fprintf(stderr, "ERROR ip=%xh\n", ip); }
+  tracef("ip %X:\n", ip);
   assert(ip < _codesize);
   uint8_t opcode = code[ip++];
-  fprintf(stderr, "ip=%xh, op=%xh\n", ip, opcode); // DEBUG
+  tracef("op=%X\n", opcode);
   // decode TODO
   // execute
   if (opcode < 0x80) { // push unsigned immediate
@@ -341,11 +357,10 @@ bool cycle() {
     case OP_shl: {
       uint32_t b = pop().u & 0x1F;
       uint64_t a = pop().u;
-      uint32_t r = a % b;
+      uint32_t r = a << b;
       push((word_t){ .u = r });
     } break;
     case OP_imm: {
-      assert(ip + 4 < _codesize);
       push(imm32());
     } break;
     // Jumps //
@@ -438,8 +453,8 @@ bool cycle() {
       pop();
     } break;
     case OP_xch: {
-      word_t b = pop();
       word_t a = pop();
+      word_t b = pop();
       push(a);
       push(b);
     } break;
