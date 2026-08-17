@@ -1,0 +1,42 @@
+0000_0020 # entry point
+0000_0040 # code size
+0000_0040 # stack base
+0000_0040 # max memory
+
+# **SYMBOL TABLE**
+# 10: const "hello/n"
+# 20: main()
+
+@hello =10
+
+
+# h  e  l  l  o  \n
+  68 65 6C 6C 6F 0A
+@hello.end =16
+
+    _         _0000 0000_0000 0000_0000 # .align h10
+@ =20
+
+
+@main =20
+# reg r0: len = (@hello.end - @hello) -> h6
+  E006 # mov r0 6
+# reg r1: strp = @hello -> h10
+  E110 # mov r1 h10
+@main.l =24
+# loop {
+  # if (len == 0) exit(0)
+    C010 # ceq r0 0
+    F070 # hlt 0
+  # put(*strp++)
+    AA81 # ldb ra r1
+    FA10 # out ra
+    0101 # add r1 1
+  # len--
+    1001 # sub r0 1
+# }
+  1F0E # j -14
+@ =32
+
+    _0000 0000_0000 0000_0000 0000_0000
+@codesize =40

@@ -1,0 +1,255 @@
+
+# **SYMBOL TABLE**
+#
+# 10: magic
+# 40: skipThru
+# 50: xlateNybble
+# 80: readByte
+# A0: main
+# F0: assertAddr
+
+0000_00A0 # entrypoint = @main
+0000_0130 # code size = @hexfile.end
+0000_0130 # stack base
+0000_0130 # max memory
+
+# So, this code is _scuffed_.
+# There's a one-off calling convention where:
+# - the stack isn't used
+# - r0 is usually a first argument and return value
+# - r1 might be the first argument
+# - r2 is reserved as an accumulator for readByte and assertAddr (which don't call each other)
+# - r3-r5 are unusued
+# - r6-r8 are used for return addresses by various functions:
+#   - r6 for readByte
+#   - r7 for skipThru and assertAddr
+#   - r8 for xlateNybble
+# - r9 is used to save r7 in assertAddr before calling skipThru
+# - ra-rb are local scratch registers
+# - fp, sp are the stack, but are unused
+# - ep is the global offset counter (checked in assertAddr but maintained in main)
+# - ip is fine
+#
+# Of course, I can get away with this heresy because the call stack is as simple as:
+# main
+# |_skipThru
+# |_readByte
+#   |_xlateNybble
+# |_assertAddr
+#   |_xlateNybble
+#   |_skipThru
+
+# From writing this, I notice that I'm constantly doing stuff like
+# `mov r6 ip; add r6 4`, and it would really be nice to instead write
+# `mov r6 ip+4` as a single instruction.
+# If the `mov` instruction can just take 3-bit word offset,
+#   that could help compute `ep+N` for closure variables,
+#   `sp+N` for temporaries
+#   `fp+N` for arguments/locals.
+# It would also let me do _weird_ stuff like `mov ip ip+4` instead of `add ip 4`,
+#   but maybe that's a price I'm willing to pay.
+
+@magic =10
+2321_2F75 7372_2F62 696E_2F65 6e76_2020 # "#!/usr/bin/env  "
+6B69_7373 2D68_6578 2020_2020 2020_200A # "kiss-hex       \n"
+6B69_7373 2076_6D00 0000_0000 0000_0000 # "kiss vm\0" 0 0
+@magic.end =40
+
+@skipThru =40
+# skipThru(end(r1)) ->(r7) void {
+  # loop {
+    # c = get()
+      f000 # in r0(c)
+    # if (c < 0) exit(0)
+      c000 # cltz r0(c)
+      f070 # hlt 0
+    # if (c == end) return
+      c091 # ceq r0(c) r1(end)
+      ef87 # mov ip r7
+  # }
+    1f0C # j -12
+# }
+@skipThru.end =4C
+                              0000_0000
+
+@xlateNybble =50
+# xlateNybble(c(r0)) ->(r8) n(r0) {
+  # if (n >= h60) n -= h20
+    ea60 # mov ra h60
+    cab0 # cle r0 ra
+    1020 # sub r0 h20
+  # if (n < '0') exit(1)
+    ea30 # mov ra h30
+    c0aa # clt r0 ra
+    f071 # hlt 1
+  # if (n <= '9')
+    ea39 # mov ra '9'
+    c0ca # cgt r0 ra
+    0f04 # j +4
+  # {
+    # c -= h30
+      1030 # sub r0 h30
+    # return c
+      ef88 # mov ip r8
+  # }
+  # if (n < 'A') exit(1)
+    ea41 # mov ra h41
+    c0aa # clt r0 ra
+    f071 # hlt 1
+  # if (n >= 'F') exit(1)
+    ea46 # mov ra h46
+    c0ca # clt r0 ra
+    f071 # hlt 1
+  # c -= ('A' - 10)
+    1037
+  # return c
+    ef88 # mov ip r8
+# }
+@=76
+               0000 0000_0000 0000_0000
+
+@readByte =80
+# readByte(c(r0)) ->(r6) w8(r0) {
+  # c = xlateNybble(c)
+    e89f # mov r8 ip+2
+    ef50 # mov ip @xlateNybble
+  # b = c << 4
+    e280 # mov r2(b) r0(c)
+    6204 # shl r2(b) 4
+  # c = get()
+    f000 # in r0(c)
+  # c = xlateNybble(c)
+    e89f # mov r8 ip+2
+    ef50 # mov ip @xlateNybble
+  # return (b | c)
+    5082 # or r0(c) r2(b)
+    ef86 # mov ip r6
+# }
+@=92
+
+     0000 0000_0000 0000_0000 0000_0000
+
+@main =A0
+# main() -> never {
+  # print(magic)
+    e010 # mov r0 @magic
+    e140 # mov r1 @magic.end
+    aa80 # ldb ra r0
+    fa10 # out ra
+    0001 # add r0 1
+    c0a1 # clt r0 r1
+    1f0A # j -10
+
+  # ctr = 0
+    ee00 # mov ep(ctr) 0
+  # $r7 = &&main.loop
+    e78f # mov r7 ip
+
+  # loop {
+  @main.loop =B2
+    # c = get()
+      f000 # in r0(c)
+    # if (c < 0) exit(0)
+      c000 # cltz r0(c)
+      f070 # hlt 0
+
+    # switch (c) {
+    # case '#':
+      ea23 # mov ra '#'
+      cae0 # cne ra r0(c)
+      0f04 # j+4
+      # skipThru('\n', exit &&loop)
+        e10A # mov r1 '\n'
+        ef40 # mov ip @skipThru
+    # case '@': assertAddr(ctr)
+      ea40 # mov ra '@'
+      ca90 # ceq ra r0(c)
+      0f28 # j +40
+    # case ' ': continue
+      ea20 # mov ra ' '
+      ca90 # ceq ra r0(c)
+      ef87 # mov ip r7(@main.loop)
+    # case '_': continue
+      ea5F # mov ra '_'
+      ca90 # ceq ra r0(c)
+      ef87 # mov ip r7(@main.loop)
+    # case '\n': continue
+      c01a # ceq r0(c) '\n'
+      ef87 # mov ip r7(@main.loop)
+    # default:
+      # c = readByte(c)
+        e68f # mov r6 ip
+        0604 # add r6 4
+        1f5E # j -5E(@readByte - $$ = h80 - hDE)
+        @=DE
+      # put(c)
+        f010 # out r0(c)
+      # ctr++
+        0e01 # add ctr(ep) 1
+    # }
+      ef87 # mov ip r7(@main.loop)
+  # }
+# }
+@=E4
+
+          0000_0000 0000_0000 0000_0000
+@assertAddr =F0
+# assertAddr(ctr(ep)) ->(r7) {
+  # prologue: save r7 to r9
+    e987 # mov r9 r7
+  # skipThru('=')
+    e13D # mov r1 '='
+    e78f # mov r7 ip
+    0704 # add r7 4
+    ef40 # mov ip @skipThru
+
+  # acc = 0
+    e200 # mov r2(acc) 0
+  @addr.loop =FC
+  # loop {
+    # c = get()
+      f000 # in r0(c)
+    # if (c < 0) break
+      c000 # cltz r0
+      0f20 # j +32(@assert.done - $$)
+    # switch (c) {
+    # case ' ':
+      ea20 # mov ra ' '
+      cae0 # cne ra r0
+      0f0A # j +10
+      # skipThru('\n')
+        e10A # mov r1 '\n'
+        e78f # mov r7 ip
+        0704 # add r7 4
+        ef40 # mov ip @skipThru
+      # fallthru
+        0f04 # j +4
+    # case '\n': break
+      c01A # ceq r0(c) '\n'
+      0f0C # j +12(@assert.done - $$)
+    # default:
+      # c = xlateNybble(c)
+        e88f # mov r8 ip
+        0804 # add r8 4
+        ef50 # mov ip @xlateNybble
+      # acc = (acc << 4) | c
+        6204 # shl r2(acc) 4
+        5280 # or r2(acc) r0(c)
+    # }
+    1f26 # j -38(@addr.loop - $$)
+  # }
+
+  @assert.done =122
+  # if (ctr != acc) exit(1)
+    cee2 # cne ep(ctr) r2(acc)
+    f071 # hlt 1
+  # epilogue: restore r7 from r9
+    e789 # mov r7 r9
+  # return
+    e082 # mov r0 r2(acc)
+    ef87 # mov ip r7
+# }
+@=12C
+
+                             0000_0000
+@hexfile.end =130
