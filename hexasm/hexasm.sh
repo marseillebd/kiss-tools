@@ -1,8 +1,8 @@
-#!/bin/sh           
+#!/bin/sh
 set -e
 
 printf "#!/usr/bin/env  "
-printf "kiss-hex       \n"
+printf "kiss-vm        \n"
 printf "kiss vm\0"
 printf "\0\0\0\0\0\0\0\0"
 

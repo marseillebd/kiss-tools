@@ -1,2 +1,4 @@
+.build/
+dist/
+*.bak
 .*.swp
-a.out
