@@ -94,7 +94,7 @@ help = do
   putStrLn "  --help, -?: display this help message and exit"
 
 debug :: String -> IO ()
-debug msg = hPutStrLn stderr msg
+debug msg = pure () -- hPutStrLn stderr msg
 
 data VM = VM
   { mem :: MutableByteArray# RealWorld

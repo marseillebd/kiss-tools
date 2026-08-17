@@ -1,4 +1,10 @@
+#!/usr/bin/env python3
 from typing import List
+
+# let's see if I can't organize these nicely
+# 0x00--0x3F are striped with the low nybble:
+# - 0x_0--0x_3: src dst
+# - 0x_4--0x_F: src src dst
 
 instrs: List[tuple[int, str, str]] = [
 # opcode | mnemonic | flags
