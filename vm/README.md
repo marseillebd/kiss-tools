@@ -173,7 +173,7 @@ R-bit:
 - 1 to use a register, 0 to use an immediate
 Offset?:
 - a 3-bit signed immediate that is multiplied by four and added to the contents of the src register
-- this let's me, say, `st sp [ip + 4]; j @func; nop; ret_to_instr;`
+- this let's me, say, `st ip [ip + 4]; j @func; nop; ret_to_instr;`
 - I might decide to only mul by 2: I'm facing a choice of values in 6 to -8 or 12 to -16.
 - Another option: multiply but use a bias, say, -12 to 16 `sext(off)+1*4`, but a bias means that the pure register isn't just the `1` nybble
 - I see it esp used on ip, sp, fp, and sp, but only ip/sp would use negatives

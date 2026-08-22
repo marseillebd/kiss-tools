@@ -3,7 +3,7 @@ set -ex
 cd "$(dirname "$0")"
 
 if [ -d dist ]; then
-  mv dist dst.bak
+  mv dist dist.bak
   [ -d dist.bak ] && rm -r dist.bak
 fi
 
