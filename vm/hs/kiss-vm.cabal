@@ -1,0 +1,30 @@
+cabal-version:      3.0
+name:               kiss-vm
+version:            0.1.0.0
+synopsis:           prototype kiss virtual machine and related tools
+-- description:
+license:            GPL-3.0-or-later
+license-file:       LICENSE
+author:             Marseille Bouchard
+maintainer:         marseillebd@proton.me
+-- copyright:
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+executable kiss-vm
+    import:           warnings
+    main-is:          Main.hs
+    -- other-modules:
+    -- other-extensions:
+    build-depends:
+      , base ^>=4.21.0.0
+      , containers
+      , ghc-prim
+      , primitive
+      , transformers
+    hs-source-dirs:   app
+    default-language: Haskell2010
