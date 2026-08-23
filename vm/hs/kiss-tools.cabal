@@ -1,5 +1,5 @@
 cabal-version:      3.0
-name:               kiss-vm
+name:               kiss-tools
 version:            0.1.0.0
 synopsis:           prototype kiss virtual machine and related tools
 -- description:
@@ -15,7 +15,7 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
-executable kiss-vm
+executable kiss
     import:           warnings
     main-is:          Main.hs
     -- other-modules:
@@ -25,6 +25,7 @@ executable kiss-vm
       , containers
       , ghc-prim
       , mtl
+      , optparse-applicative
       , primitive
       , transformers
     hs-source-dirs:   app

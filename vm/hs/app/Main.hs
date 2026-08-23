@@ -1,3 +1,4 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -108,6 +109,7 @@ module Main (main) where
 import Prelude hiding (cycle, div, and)
 import qualified Prelude
 
+import Control.Applicative((<**>))
 import Control.Exception (catch, throw)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad (forM, forM_, when, void)
@@ -124,14 +126,28 @@ import Data.Primitive (sizeOfType)
 import Data.Void (Void)
 import Data.Word (Word8, Word16, Word32)
 import Numeric (showHex)
+import Options.Applicative (Parser, info, progDesc, hsubparser)
+import Options.Applicative (command, argument, metavar)
 import System.Environment (getArgs)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO.Error (isEOFError)
 import System.IO (stdin, stdout, withFile, IOMode(ReadMode), hGetChar, hPutChar, hSetEncoding, latin1, Handle)
 
+import qualified Options.Applicative as Opts
 
 main :: IO ()
 main = do
+  opts <- Opts.execParser $ info (cliOptions <**> Opts.helper)
+    (  progDesc "suite of prototype kiss tools"
+    )
+  print opts
+
+  case opts.cliCommand of
+    CmdExample{..} -> do
+      asm <- case exampleName of
+        "hello" -> pure helloAsm
+      case exampleType of
+        "hex" -> putStrLn $ hexdump $ runAsm asm
 
   -- progFile <- parseArgs
   -- st <- withFile progFile ReadMode $ \fp -> do
@@ -142,16 +158,40 @@ main = do
   -- hSetEncoding stdout latin1
   -- runVm st cycle
 
-  let i :: Instruction r => r
-      i = decodeIntruction 0xF07A
-  putStrLn $ showHex (i @Word16) ""
-  st <- newVmSt 1234
-  runVm st $ do
-    i
+  -- let i :: Instruction r => r
+  --     i = decodeIntruction 0xF07A
+  -- putStrLn $ showHex (i @Word16) ""
+  -- st <- newVmSt 1234
+  -- runVm st $ do
+  --   i
 
 ------------------------------------
 ------ Command Line Interface ------
 ------------------------------------
+
+data CliOptions = CliOptions
+  { cliCommand :: !CliCommand
+  }
+  deriving (Show)
+data CliCommand
+  = CmdExample
+    { exampleName :: !String
+    , exampleType :: !String
+    }
+  deriving (Show)
+
+cliOptions :: Parser CliOptions
+cliOptions = do
+  cliCommand <- hsubparser
+    (  command "example" (info cmdExample (progDesc "generate example kiss files"))
+    )
+  pure CliOptions{..}
+
+cmdExample :: Parser CliCommand
+cmdExample = do
+  exampleName <- argument Opts.str (metavar "NAME")
+  exampleType <- argument Opts.str (metavar "TYPE")
+  pure CmdExample{..}
 
 parseArgs :: IO FilePath
 parseArgs = do
@@ -223,7 +263,7 @@ loadExeFile fp = do
   initVm hdr = do
     st <- newVmSt hdr.maxMem
     runVm st $ do
-      st32be 0 0         -- mem32[0] = 0
+      st32be 0 0             -- mem32[0] = 0
       st32be 4 hdr.codeSize  -- mem32[1] = codeSize (ie bottom of heap)
       st32be 8 hdr.stackBase -- mem32[2] = stackBase (ie top of heap)
       st32be 12 hdr.maxMem   -- mem32[3] = maxMem in bytes
@@ -722,6 +762,32 @@ vmHalt code = Vm $ liftIO $ exitWith $ ExitFailure (fromIntegral code)
 ------ Assembler ------
 -----------------------
 
+helloAsm :: Asm ()
+helloAsm = mdo
+  asmWord atMain
+  asmWord atEnd
+  asmWord atEnd
+  asmWord atEnd
+  atHello <- asmHere
+  asmAscii "hello world!\n"
+  atHelloEnd <- asmHere
+  let helloLen = atHelloEnd - atHello
+  asmPad 16
+  (atMain, atLoopEnd) <- asmBlock
+    [ mov (OpdR 0) (OpdSImm 0)
+    , mov (OpdR 3) (OpdSImm $ fromIntegral helloLen)
+    , mov (OpdR 4) (OpdSImm $ fromIntegral atHello)
+    , cCC (OpdR 4) UEq (OpdXReg 3)
+    , sys (OpdR 0) Hlt (OpdXImm 0)
+    , mov (OpdR 1) (OpdSReg IndexedByte 0)
+    , sys (OpdR 1) Put (OpdXImm 0)
+    , add (OpdR 4) (OpdSImm 1)
+    , sub (OpdR 0xC) (OpdSImm $ fromIntegral $ atLoopEnd - atMain)
+    ]
+  asmPad 16
+  atEnd <- asmHere
+  pure ()
+
 -- TODO turns out StateT is a MonadFix, so we can already get a linker like, eg
 -- rec do
 --   add (OpdR 0xC) (OpdSImm $ target - from)
@@ -730,66 +796,80 @@ vmHalt code = Vm $ liftIO $ exitWith $ ExitFailure (fromIntegral code)
 --   target <- here
 --   ...
 
--- instance Instruction r where
-  -- add :: OperandR -> OperandS -> r
-  -- sub :: OperandR -> OperandS -> r
-  -- mul :: OperandR -> OperandS -> r
-  -- div :: OperandR -> OperandS -> r
-  -- and :: OperandR -> OperandS -> r
-  -- nor :: OperandR -> OperandS -> r
-  -- shl :: OperandR -> OperandS -> r
-  -- shr :: OperandR -> OperandS -> r
-  -- mov :: OperandR -> OperandS -> r
-  -- sto :: OperandR -> OperandS -> r
-  -- jal :: OperandR -> OperandS -> r
-  -- -- idk
-  -- cc :: OperandR -> Condition -> OperandX -> r
-  -- ldi :: OperandR -> Word8 -> r
-  -- -- idk
-  -- sys :: OperandR -> SysFunc -> OperandX -> r
-
--- TODO for now, I'm just doing explicit two passes, but this could be done in a MonadFix I think
-
-newtype Asm a = Asm { unAsm :: State AsmSt a }
-  deriving(Functor, Applicative, Monad, MonadFix)
-data AsmSt = AsmSt
-  { asmTextSize :: Word32
-  , asmOut :: [Word8]
-  }
-
-runAsm :: Asm a -> AsmSt
-runAsm action = adapt $ execState (unAsm action) st0
-  where
-  adapt st = st
-    { asmOut = reverse st.asmOut
-    }
-  st0 = AsmSt
-    { asmTextSize = 0
-    , asmOut = []
-    }
-
-asmHere_ :: Asm any -> Asm (Word32, Word32)
-asmHere_ action = do
-  here <- Asm $ gets asmTextSize
-  _ <- action
-  next <- Asm $ gets asmTextSize
-  pure (here, next)
+instance Instruction (Asm ()) where
+  instr op opds = asmInstr (instr op opds)
 
 asmByte :: Word8 -> Asm ()
 asmByte b = Asm $ modify $ \st -> st
-  { asmTextSize = st.asmTextSize + 1
+  { asmCur = st.asmCur + 1
   , asmOut = b : st.asmOut
   }
 
-asmInstr :: Word16 -> Asm ()
-asmInstr code = do
-  asmByte $ fromIntegral (code .&. 0xFF)
-  asmByte $ fromIntegral (code `shiftR` 8)
+asmHere :: Asm Word32
+asmHere = Asm $ gets asmCur
+
+------ Assembler Utilities ------
 
 asmWord :: Word32 -> Asm ()
 asmWord word = forM_ [3,2,1,0] $ \i -> do
   let byte = (word `shiftL` (8*i)) .&. 0xFF
   asmByte $ fromIntegral byte
+
+asmPad :: Word32 -> Asm ()
+asmPad n = do
+  here <- asmHere
+  if here `mod` n == 0 then pure ()
+  else asmByte 0 >> asmPad n
+
+asmAscii :: String -> Asm ()
+asmAscii str = forM_ str $ \c ->
+  asmByte (fromIntegral $ ord c .&. 0x7F)
+
+asmAsciiz :: String -> Asm ()
+asmAsciiz str = asmAscii str >> asmByte 0
+
+asmBlock :: [Asm ()] -> Asm (Word32, Word32)
+asmBlock text = do
+  a <- asmHere
+  forM_ text id
+  b <- asmHere
+  pure (a, b)
+
+------ Printing ------
+
+hexdump :: [Word8] -> String
+hexdump bytes =
+  let hexBytes = concat $ hexByte <$> bytes
+      hexLines = chunksOf 4 <$> chunksOf 32 hexBytes
+   in unlines (unwords <$> hexLines)
+
+------ Assembly Monad ------
+
+newtype Asm a = Asm { unAsm :: State AsmSt a }
+  deriving(Functor, Applicative, Monad, MonadFix)
+data AsmSt = AsmSt
+  { asmCur :: Word32
+  , asmOut :: [Word8]
+  }
+
+runAsm :: Asm a -> [Word8]
+runAsm action = adapt $ execState (unAsm action) st0
+  where
+  adapt AsmSt{..} =
+    let shebang = (fromIntegral . ord) <$>
+          "#!/usr/bin/env  kiss-vm        \n"
+        magic = (fromIntegral . ord) <$>
+          "kiss vm\0" ++ "\0\0\0\0\0\0\0\0"
+      in shebang ++ magic ++ reverse asmOut
+  st0 = AsmSt
+    { asmCur = 0
+    , asmOut = []
+    }
+
+asmInstr :: Word16 -> Asm ()
+asmInstr code = do
+  asmByte $ fromIntegral (code .&. 0xFF)
+  asmByte $ fromIntegral (code `shiftR` 8)
 
 ---------------------
 ------ Helpers ------
@@ -805,3 +885,14 @@ swap (a, b) = (b, a)
 infixl 5 .~|.
 (.~|.) :: Bits a => a -> a -> a
 a .~|. b = complement (a .|. b)
+
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf n xs =
+  let (group, rest) = splitAt n xs
+   in group : chunksOf n rest
+
+hexByte :: Word8 -> String
+hexByte b
+  | b < 0x10 = '0' : showHex b ""
+  | otherwise = showHex b ""
