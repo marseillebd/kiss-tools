@@ -5,188 +5,11 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE ViewPatterns #-}
-
-module Main (main) where
-
-import Prelude hiding (cycle, div, and)
-import qualified Prelude
-
-import Control.Exception (catch, throw)
-import Control.Monad (forM, forM_, when)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Primitive (RealWorld)
-import Control.Monad.Trans.Reader (ReaderT, runReaderT, ask)
-import Data.Bits (Bits, shiftR, shiftL, (.&.), (.|.), complement)
-import Data.Char (ord, chr)
-import Data.Primitive.ByteArray (MutableByteArray, newByteArray, readByteArray, writeByteArray)
-import Data.Primitive (sizeOfType)
-import Data.Word (Word8, Word16, Word32)
-import Numeric (showHex)
-import System.Environment (getArgs)
-import System.Exit (ExitCode(..), exitWith)
-import System.IO.Error (IOError, isEOFError)
-import System.IO (stdin, stdout, stderr, withFile, IOMode(ReadMode), hGetChar, hPutChar, hSetEncoding, latin1, hPutStrLn, Handle)
-
-
-main :: IO ()
-main = do
-  let instr = decode 0xF07A
-  runVm $ do
-    instr
-
-  -- progFile <- getArgs >>= \case
-  --   "-?" : _ -> help >> exitWith ExitSuccess
-  --   "--help" : _ -> help >> exitWith ExitSuccess
-  --   ["--", path] -> pure path
-  --   [path] -> pure path
-  --   -- TODO accept "-" as stdin
-  --   _ -> help >> exitWith (ExitFailure 1)
-  -- vm <- withFile progFile ReadMode $ \fp -> do
-  --   hSetEncoding fp latin1
-  --   -- find header
-  --   c0 <- hGetChar fp
-  --   c1 <- case c0 of
-  --     '#' -> loop
-  --       where
-  --       loop = hGetChar fp >>= \case
-  --         '\n' -> hGetChar fp
-  --         _ -> loop
-  --     _ -> pure c0
-  --   -- load header
-  --   -- lead header: first 16 bytes
-  --   magic <- fmap (c1:) $ forM [1..7] $ \_ -> hGetChar fp
-  --   case magic of
-  --     "kiss vm\0" -> pure ()
-  --     _ -> error "missing magic"
-  --   let be32 :: IO Word32
-  --       be32 = do
-  --         bytes <- forM [1..4] $ \_ -> fromIntegral . ord <$> hGetChar fp
-  --         pure $ foldl (\hi lo -> (hi `shiftL` 8) .|. lo) 0 bytes
-  --   forM_ [1..8] $ \_ -> hGetChar fp -- 8-byte padding
-  --   entryPoint <- be32
-  --   codeSize <- be32
-  --   stackBase <- be32
-  --   maxMem <- be32
-  --   when (codeSize <= entryPoint) $ error "entry point exceeds program size"
-  --   when (stackBase < codeSize) $ error "stack position starts inside program"
-  --   when (maxMem < stackBase) $ error "stack position exceeds max memory"
-  --   vm <- newVM maxMem
-  --   -- ensure address 0 has contents 0
-  --   st32 vm 0 0
-  --   -- load end of program to address 4
-  --   st32 vm 4 codeSize
-  --   -- load the stack base into address 8
-  --   st32 vm 8 stackBase
-  --   -- load maximum memory into address 12
-  --   st32 vm 12 maxMem
-  --   -- load the rest of program text into memory, after maxMem
-  --   forM_ [16..codeSize-1] $ \i -> do
-  --     b <- fromIntegral . ord <$> hGetChar fp
-  --     st8 vm i b
-  --   -- initialize special registers
-  --   writeReg vm 12 stackBase -- set fp
-  --   writeReg vm 13 stackBase -- set sp
-  --   writeReg vm 15 entryPoint -- set ip
-  --   pure vm
-  -- -- setup environment
-  -- hSetEncoding stdin latin1
-  -- hSetEncoding stdout latin1
-  -- -- begin execution
-  -- let loop = cycle vm >> loop
-  -- loop
-
-help :: IO ()
-help = do
-  putStrLn "usage: kissvm PROG"
-  putStrLn "    loads and executes a kiss vm binary"
-  putStrLn ""
-  putStrLn "  --help, -?: display this help message and exit"
-
-debug :: String -> IO ()
-debug msg = pure () -- hPutStrLn stderr msg
-
--- cycle :: VM -> IO ()
--- cycle vm = do
---   --- fetch ---
---   ip <- readReg vm 15
---   instr <- ld16 vm ip
---   debug $ showHex ip $ ' ' : showHex instr ""
---   writeReg vm 15 (ip + 2)
---   --- decode ---
---   let opcode = (instr `shiftR` 12) .&. 0xF
---       dst = fromIntegral $ (instr `shiftR` 8) .&. 0xF
---       src = fromIntegral $ instr .&. 0xF
---       r = (instr .&. 0x80) /= 0
---       func = (instr `shiftR` 4) .&. 0x7
---       imm = fromIntegral $ instr .&. 0xFF
---   --- execute ---
---   let readRegIsrc = if r then readReg vm src else pure imm
---       readRegI4src = if r then readReg vm src else pure (fromIntegral src)
---       binary f = do
---         f <$> readReg vm dst <*> readRegIsrc
---   case opcode of
---     -- arithmetic
---     0 -> writeReg vm dst =<< binary (+)
---     1 -> writeReg vm dst =<< binary (-)
---     2 -> writeReg vm dst =<< binary (*)
---     3 -> writeReg vm dst =<< binary Prelude.div
---     -- logic
---     4 -> writeReg vm dst =<< binary (.&.)
---     5 -> do
---       a <- readReg vm dst
---       b <- readRegIsrc
---       debug $ "or: " ++ showHex a (" " ++ showHex b "")
---       writeReg vm dst =<< binary (.|.)
---     6 -> do
---       a <- readReg vm dst
---       b <- readRegIsrc
---       debug $ "shl: " ++ showHex a (" " ++ showHex b "")
---       writeReg vm dst =<< binary (\a b -> a `shiftL` fromIntegral b)
---     7 -> writeReg vm dst =<< binary (\a b -> a `shiftR` fromIntegral b)
---     -- memory
---     8 -> writeReg vm dst =<< ld32 vm =<< readRegIsrc
---     9 -> bind2 (st32 vm) (readReg vm dst) readRegIsrc
---     10 -> writeReg vm dst =<< fmap fromIntegral . ld8 vm =<< readRegIsrc
---     11 -> bind2 (st8 vm) (readReg vm dst) (fromIntegral <$> readRegIsrc)
---     -- other
---     12 -> do -- conditionals
---       a <- readReg vm dst
---       b <- readRegI4src
---       let cond = if func == 0 then 8 else func
---           flags = (if a == b then 1 else 0) .|.
---                   (if a < b then 2 else 0) .|.
---                   (if a > b then 4 else 0) .|.
---                   (if a > 0x7FFF_FFFF then 8 else 0)
---       debug $ show [a, b] ++ show [cond, flags]
---       if cond .&. flags == 0
---       then writeReg vm 15 (ip + 4) -- advance past this instr and the next one, making the advance in fetch moot
---       else pure ()
---     13 -> do -- load immediate
---       v0 <- readReg vm dst
---       let v1 = (v0 `shiftL` 8) .|. imm
---       writeReg vm dst v1
---     14 -> do -- move
---       let off = 2 * fromIntegral func
---       a <- if r then (off +) <$> readReg vm src else pure imm
---       writeReg vm dst a
---     15 -> -- system
---       case func of
---         0 -> do -- read
---           a <- vmGet vm
---           debug $ "in: " ++ (if a >= 256 then "EOF" else show . chr $ fromIntegral a) ++ " " ++ showHex a ""
---           writeReg vm dst a
---         1 -> do -- write
---           vmPut vm =<< readReg vm dst
---         7 -> do -- halt
---           ec <- readRegI4src
---           let hsEc = if ec == 0 then ExitSuccess else ExitFailure (fromIntegral ec)
---           exitWith hsEc
---         _ -> error $ "unknown system call number: " ++ show func ++ " at " ++ showHex ip ""
---   pure ()
-
 
 {-
 Load instr can now be replaced by ordinary rs-type mov.
@@ -278,18 +101,144 @@ or d s        ===    nor d s; nor d d
 
 -}
 
+
+module Main (main) where
+
+import Prelude hiding (cycle, div, and)
+import qualified Prelude
+
+import Control.Exception (catch, throw)
+import Control.Monad (forM, forM_, when, void)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Primitive (RealWorld)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT, ask)
+import Data.Bits (Bits, shiftR, shiftL, (.&.), (.|.), complement)
+import Data.Char (ord, chr)
+import Data.Primitive.ByteArray (MutableByteArray, newByteArray, readByteArray, writeByteArray)
+import Data.Primitive (sizeOfType)
+import Data.Word (Word8, Word16, Word32)
+import System.Environment (getArgs)
+import System.Exit (ExitCode(..), exitWith)
+import System.IO.Error (isEOFError)
+import System.IO (stdin, stdout, withFile, IOMode(ReadMode), hGetChar, hPutChar, hSetEncoding, latin1, Handle)
+
+
+main :: IO ()
+main = do
+  progFile <- parseArgs
+  st <- withFile progFile ReadMode $ \fp -> do
+    hSetEncoding fp latin1
+    loadExeFile fp
+
+  -- FIXME someday the i/o streams and block devices will be loaded instead of assumed from global
+  hSetEncoding stdin latin1
+  hSetEncoding stdout latin1
+  runVm st cycle
+
+  -- let instr = decode 0xF07A
+  -- st <- newVmSt 1234
+  -- runVm st $ do
+  --   instr
+
+------------------------------------
+------ Command Line Interface ------
+------------------------------------
+
+parseArgs :: IO FilePath
+parseArgs = do
+  progFile <- getArgs >>= \case
+    "-?" : _ -> help >> exitWith ExitSuccess
+    "--help" : _ -> help >> exitWith ExitSuccess
+    ["--", path] -> pure path
+    [path] -> pure path
+    -- TODO accept "-" as stdin
+    _ -> help >> exitWith (ExitFailure 1)
+  pure progFile
+
+help :: IO ()
+help = do
+  putStrLn "usage: kissvm PROG"
+  putStrLn "    loads and executes a kiss vm binary"
+  putStrLn ""
+  putStrLn "  --help, -?: display this help message and exit"
+
+-----------------------------
+------ Kiss Exe Format ------
+-----------------------------
+
+data ExeHeader = ExeHdr
+  { entryPoint :: Word32
+  , codeSize :: Word32
+  , stackBase :: Word32
+  , maxMem :: Word32
+  }
+
+loadExeFile :: Handle -> IO VmSt
+loadExeFile fp = do
+  () <- findHeader
+  hdr <- loadHeader
+  initVm hdr
+  where
+
+  findHeader = do
+    c0 <- hGetChar fp
+    c1 <- case c0 of
+      '#' -> loop
+        where
+        loop = hGetChar fp >>= \case
+          '\n' -> hGetChar fp
+          _ -> loop
+      _ -> pure c0
+    magic <- fmap (c1:) $ forM [1..7] $ \(_::Int) -> hGetChar fp
+    case magic of
+      "kiss vm\0" -> pure ()
+      _ -> error "missing magic"
+
+  loadHeader = do
+    let be32 :: IO Word32
+        be32 = do
+          bytes <- forM [1..4] $ \(_::Int) -> fromIntegral . ord <$> hGetChar fp
+          pure $ foldl (\hi lo -> (hi `shiftL` 8) .|. lo) 0 bytes
+    forM_ [1..8] $ \(_::Int) -> hGetChar fp -- 8-byte padding
+    entryPoint <- be32
+    codeSize <- be32
+    stackBase <- be32
+    maxMem <- be32
+    when (codeSize <= entryPoint) $ error "entry point exceeds program size"
+    when (stackBase < codeSize) $ error "stack position starts inside program"
+    when (maxMem < stackBase) $ error "stack position exceeds max memory"
+    when (0x4_0000 < maxMem) $ error "required memory exceeeds maximum arcitecture memory"
+    pure ExeHdr{..}
+
+  initVm :: ExeHeader -> IO VmSt
+  initVm hdr = do
+    st <- newVmSt hdr.maxMem
+    runVm st $ do
+      st32be 0 0         -- mem32[0] = 0
+      st32be 4 hdr.codeSize  -- mem32[1] = codeSize (ie bottom of heap)
+      st32be 8 hdr.stackBase -- mem32[2] = stackBase (ie top of heap)
+      st32be 12 hdr.maxMem   -- mem32[3] = maxMem in bytes
+      forM_ [16 .. hdr.codeSize-1] $ \i -> do -- load rest of program text
+        b <- Vm $ liftIO $ fromIntegral . ord <$> hGetChar fp -- FIXME
+        st8 i b
+      writeReg 0xD hdr.stackBase -- set sp
+      writeReg 0xF hdr.stackBase -- set fp
+      writeReg 0xC hdr.entryPoint -- set pc
+    pure st
+
 --------------------
 ------ Decode ------
 --------------------
 
 decode :: Instruction r => Word16 -> r
 decode instr =
-  let opcode = (instr `shiftR` 12) .&. 0xF
-      dst = OpdR . fromIntegral $ (instr `shiftR` 8) .&. 0xF
-      opdS = decodeOpdS . fromIntegral $ instr .&. 0xFF
-      opdX = decodeOpdX . fromIntegral $ instr .&. 0x8F
-      cond = decodeCond . fromIntegral $ (instr `shiftR` 4) .&. 0x7
-      sysfunc = decodeSysfunc . fromIntegral $ (instr `shiftR` 4) .&. 0x7
+  let opcode =                                (instr .&. 0xF000) `shiftR` 12
+      dst    = OpdR          . fromIntegral $ (instr .&. 0x0F00) `shiftR` 8
+      opdS   = decodeOpdS    . fromIntegral $  instr .&. 0x00FF
+      opdX   = decodeOpdX    . fromIntegral $  instr .&. 0x008F
+      cond   = decodeCond    . fromIntegral $ (instr .&. 0x0070) `shiftR` 4
+      func   = decodeSysfunc . fromIntegral $ (instr .&. 0x0070) `shiftR` 4
+      imm8   =                 fromIntegral $  instr .&. 0x00FF
    in case opcode of
     0x0 -> add dst opdS
     0x1 -> sub dst opdS
@@ -303,8 +252,8 @@ decode instr =
     0x9 -> sto dst opdS
     0xA -> jal dst opdS
     0xC -> cCC dst cond opdX
-    0xD -> ldi dst (fromIntegral $ instr .&. 0xFF)
-    0xF -> sys dst sysfunc opdX
+    0xD -> ldi dst imm8
+    0xF -> sys dst func opdX
     _ -> error "illegal opcode"
 
 decodeOpdS :: Word8 -> OperandS
@@ -434,6 +383,18 @@ instance Integral Word7 where
 ------ Virtual Machine ------
 -----------------------------
 
+cycle :: Vm ()
+cycle = cycle1 >> cycle
+
+cycle1 :: Vm ()
+cycle1 = do
+  instr <- fetch
+  let action = decode instr
+  action
+
+fetch :: Vm Word16
+fetch = ld16be =<< incPc
+
 instance Instruction (Vm ()) where
   add dst src = binOpR (+) dst (effR dst) (effS src)
   sub dst src = binOpR (-) dst (effR dst) (effS src)
@@ -445,18 +406,18 @@ instance Instruction (Vm ()) where
   shr dst src = binOpR shiftR dst (effR dst) (fromIntegral <$> effS src)
   mov dst src = binOpR const dst (effS src) (pure ())
   sto val addr = lea addr >>= \case
-    Left byteAddr -> st8 byteAddr =<< (fromIntegral <$> effR val)
-    Right wordAddr -> st32be wordAddr =<< ((4*) <$> effR val)
+    Left byteAddr  -> st8     byteAddr      =<< (fromIntegral <$> effR val)
+    Right wordAddr -> st32be (4 * wordAddr) =<< (fromIntegral <$> effR val)
   jal (OpdR dst) src = do
     target <- effS src
-    readReg 0xF >>= writeReg dst
-    writeReg 0xF target
+    readReg 0xC >>= writeReg dst
+    writeReg 0xC target
   cCC (OpdR a) f b = do
     x <- readReg a
     y <- effX b
     if condition x f y
     then pure ()
-    else incPc
+    else void $ incPc
   ldi (OpdR dst) imm = writeReg dst (fromIntegral imm)
   sys (OpdR dst) Get _ = do
     writeReg dst =<< vmGet
@@ -473,16 +434,17 @@ binOpR :: (a -> b -> Word32)
       -> Vm ()
 binOpR f (OpdR dst) a b = writeReg dst =<< (f <$> a <*> b)
 
+------ Decode ------
 effR :: OperandR -> Vm Word32
 effR (OpdR i) = readReg i
 
 effS :: OperandS -> Vm Word32
 effS (OpdSImm w7) = pure $ fromIntegral w7
-effS (OpdSReg mode i) = case mode of
-  Direct -> readReg i
-  IndexedByte -> fromIntegral <$> (readReg i >>= ld8)
-  LoIndirect -> ld32be =<< (.&. 0xFFFF) <$> readReg i
-  -- TODO
+-- TODO which means that imediate and direct mode in sto would target the addr in the register, where all others target the address that would have been calculated for a load
+effS (OpdSReg Direct i) = readReg i
+effS src@(OpdSReg _ _) = lea src >>= \case
+  Right wordAddr -> ldWord wordAddr
+  Left byteAddr -> fromIntegral <$> ld8 byteAddr
 
 effX :: OperandX -> Vm Word32
 effX (OpdXImm w4) = pure $ fromIntegral w4
@@ -493,7 +455,28 @@ lea :: OperandS -> Vm (Either Word32 Word32)
 lea (OpdSImm w7) = pure . Right $ fromIntegral w7
 lea (OpdSReg mode i) = case mode of
   Direct -> Right <$> readReg i
-  IndexedByte -> Left <$> readReg i
+  IndexedByte -> Left <$> do
+    off <- readReg 0x4
+    base <- readReg i
+    pure $ 4*base + off
+  LoIndirect -> Right . (.&. 0xFFFF) <$> readReg i
+  HiIndirect -> Right . (`shiftR` 16) <$> readReg i
+  IndexedIndirect -> Right <$> do
+    off <- readReg 0x4
+    base <- readReg i
+    pure (base + off)
+  Stack -> Right <$> do
+    sp <- readReg 0xD
+    off <- readReg i
+    pure (sp - off)
+  Env -> Right <$> do
+    ep <- readReg 0xE
+    off <- readReg i
+    pure (ep + off)
+  Frame -> Right <$> do
+    fp <- readReg 0xF
+    off <- readReg i
+    pure (fp + off)
 
 condition :: Word32 -> Condition -> Word32 -> Bool
 condition a f b =
@@ -515,17 +498,20 @@ condition a f b =
 ------ The Machine ------
 newtype Vm a = Vm { unVm :: ReaderT VmSt IO a }
   deriving (Functor, Applicative, Monad)
-runVm :: Vm a -> IO a
-runVm action = do
-  st <- VmSt
-    <$> newByteArray (fromIntegral $ 65536 * sizeOfType @Word32)
-    <*> newByteArray (fromIntegral $ 16 * sizeOfType @Word32)
+runVm :: VmSt -> Vm a -> IO a
+runVm st action = do
   runReaderT (unVm action) st
 
 data VmSt = VmSt
   { mem :: MutableByteArray RealWorld
   , regs :: MutableByteArray RealWorld
   }
+
+newVmSt :: Word32 -> IO VmSt
+newVmSt memBytes = VmSt
+  <$> newByteArray (fromIntegral memBytes)
+  <*> newByteArray (fromIntegral $ 16 * sizeOfType @Word32)
+
 
 ------ register file ------
 readReg :: Word4 -> Vm Word32
@@ -534,10 +520,11 @@ readReg (fromIntegral -> i) = Vm $ ask >>= \vm -> readByteArray vm.regs i
 writeReg :: Word4 -> Word32 -> Vm ()
 writeReg (fromIntegral -> i) v = Vm $ ask >>= \vm -> writeByteArray vm.regs i v
 
-incPc :: Vm ()
+incPc :: Vm Word32
 incPc = do
-  ip0 <- readReg 0xF
-  writeReg 0xF $ ip0 + 2
+  pc <- readReg 0xC
+  writeReg 0xC (pc + 2)
+  pure pc
 
 ------ memory unit ------
 ld8 :: Word32 -> Vm Word8
@@ -556,6 +543,9 @@ ld32be :: Word32 -> Vm Word32
 ld32be addr = do
   bytes <- forM [0..3] $ \i -> fromIntegral <$> ld8 (addr + i)
   pure $ foldr (\hi lo -> (hi `shiftL` 8) .|. lo) 0 bytes
+
+ldWord :: Word32 -> Vm Word32
+ldWord addr = ld32be (4*addr)
 
 st32be :: Word32 -> Word32 -> Vm ()
 st32be addr w32 = do
@@ -585,6 +575,14 @@ vmHalt code = Vm $ liftIO $ exitWith $ ExitFailure (fromIntegral code)
 -----------------------
 ------ Assembler ------
 -----------------------
+
+-- TODO turns out StateT is a MonadFix, so we can already get a linker like, eg
+-- rec do
+--   add (OpdR 0xC) (OpdSImm $ target - from)
+--   from <- here
+--   ...
+--   target <- here
+--   ...
 
 -- instance Instruction r where
   -- add :: OperandR -> OperandS -> r
