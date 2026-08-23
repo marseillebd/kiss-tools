@@ -24,6 +24,7 @@ executable kiss-vm
       , base >=4.20.0.0
       , containers
       , ghc-prim
+      , mtl
       , primitive
       , transformers
     hs-source-dirs:   app

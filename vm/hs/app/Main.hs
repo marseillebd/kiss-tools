@@ -6,6 +6,7 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UnboxedTuples #-}
@@ -108,15 +109,21 @@ import Prelude hiding (cycle, div, and)
 import qualified Prelude
 
 import Control.Exception (catch, throw)
+import Control.Monad.Fix (MonadFix)
 import Control.Monad (forM, forM_, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Primitive (RealWorld)
+import Control.Monad.State (State, gets, modify, execState)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT, ask)
+import Data.Bifunctor (first)
 import Data.Bits (Bits, shiftR, shiftL, (.&.), (.|.), complement)
 import Data.Char (ord, chr)
+import Data.Function ((&))
 import Data.Primitive.ByteArray (MutableByteArray, newByteArray, readByteArray, writeByteArray)
 import Data.Primitive (sizeOfType)
+import Data.Void (Void)
 import Data.Word (Word8, Word16, Word32)
+import Numeric (showHex)
 import System.Environment (getArgs)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO.Error (isEOFError)
@@ -125,20 +132,22 @@ import System.IO (stdin, stdout, withFile, IOMode(ReadMode), hGetChar, hPutChar,
 
 main :: IO ()
 main = do
-  progFile <- parseArgs
-  st <- withFile progFile ReadMode $ \fp -> do
-    hSetEncoding fp latin1
-    loadExeFile fp
 
-  -- FIXME someday the i/o streams and block devices will be loaded instead of assumed from global
-  hSetEncoding stdin latin1
-  hSetEncoding stdout latin1
-  runVm st cycle
+  -- progFile <- parseArgs
+  -- st <- withFile progFile ReadMode $ \fp -> do
+  --   hSetEncoding fp latin1
+  --   loadExeFile fp
+  -- -- FIXME someday the i/o streams and block devices will be loaded instead of assumed from global
+  -- hSetEncoding stdin latin1
+  -- hSetEncoding stdout latin1
+  -- runVm st cycle
 
-  -- let instr = decode 0xF07A
-  -- st <- newVmSt 1234
-  -- runVm st $ do
-  --   instr
+  let i :: Instruction r => r
+      i = decodeIntruction 0xF07A
+  putStrLn $ showHex (i @Word16) ""
+  st <- newVmSt 1234
+  runVm st $ do
+    i
 
 ------------------------------------
 ------ Command Line Interface ------
@@ -226,81 +235,156 @@ loadExeFile fp = do
       writeReg 0xC hdr.entryPoint -- set pc
     pure st
 
---------------------
------- Decode ------
---------------------
+-------------------
+------ Codec ------
+-------------------
 
-decode :: Instruction r => Word16 -> r
-decode instr =
-  let opcode =                                (instr .&. 0xF000) `shiftR` 12
-      dst    = OpdR          . fromIntegral $ (instr .&. 0x0F00) `shiftR` 8
-      opdS   = decodeOpdS    . fromIntegral $  instr .&. 0x00FF
-      opdX   = decodeOpdX    . fromIntegral $  instr .&. 0x008F
-      cond   = decodeCond    . fromIntegral $ (instr .&. 0x0070) `shiftR` 4
-      func   = decodeSysfunc . fromIntegral $ (instr .&. 0x0070) `shiftR` 4
-      imm8   =                 fromIntegral $  instr .&. 0x00FF
-   in case opcode of
-    0x0 -> add dst opdS
-    0x1 -> sub dst opdS
-    0x2 -> mul dst opdS
-    0x3 -> div dst opdS
-    0x4 -> and dst opdS
-    0x5 -> nor dst opdS
-    0x6 -> shl dst opdS
-    0x7 -> shr dst opdS
-    0x8 -> mov dst opdS
-    0x9 -> sto dst opdS
-    0xA -> jal dst opdS
-    0xC -> cCC dst cond opdX
-    0xD -> ldi dst imm8
-    0xF -> sys dst func opdX
-    _ -> error "illegal opcode"
+instance Instruction Word16 where
+  instr = encodeInstruction
 
+encodeInstruction :: Opcode -> AllOpds -> Word16
+encodeInstruction op (OpdR r, s, x, i, c, f) =
+  let op16 = (fromIntegral $ encodeOpcode op) `shiftL` 12
+      r16  = (fromIntegral $ r) `shiftL` 8
+      s16  = (fromIntegral $ encodeOpdS s)
+      x16  = (fromIntegral $ encodeOpdX x)
+      i16  = (fromIntegral $ i)
+      c16  = (fromIntegral $ encodeCond c) `shiftL` 4
+      f16  = (fromIntegral $ encodeSysfunc f) `shiftL` 4
+   in op16 .|. r16 .|. s16 .|. x16 .|. i16 .|. c16 .|. f16
+
+decodeIntruction :: Instruction r => Word16 -> r
+decodeIntruction code =
+  let op = decodeOpcode  . fromIntegral $ (code .&. 0xF000) `shiftR` 12
+      r  = OpdR          . fromIntegral $ (code .&. 0x0F00) `shiftR` 8
+      s  = decodeOpdS    . fromIntegral $  code .&. 0x00FF
+      x  = decodeOpdX    . fromIntegral $  code .&. 0x008F
+      i  =                 fromIntegral $  code .&. 0x00FF
+      c  = decodeCond    . fromIntegral $ (code .&. 0x0070) `shiftR` 4
+      f  = decodeSysfunc . fromIntegral $ (code .&. 0x0070) `shiftR` 4
+   in op (r, s, x, i, c, f)
+
+------ Instruction Field Helpers ------
+
+encodeOpcode :: Opcode -> Word4
+encodeOpcode op = case lookup op (fst <$> codecOpcode @Void) of
+  Just it -> it
+  Nothing -> error $ "internal: opcode " ++ show op ++ " encoding not defined"
+decodeOpcode :: Instruction r => Word4 -> AllOpds -> r
+decodeOpcode w4 = case lookup w4 (first snd <$> codecOpcode) of
+  Just op -> op
+  Nothing -> error $ "unknown opcode " ++ show w4
+codecOpcode :: Instruction r => [((Opcode, Word4), AllOpds -> r)]
+codecOpcode =
+  [ ((Add, 0x0), \(r, s, _, _, _, _) -> add r s)
+  , ((Sub, 0x1), \(r, s, _, _, _, _) -> sub r s)
+  , ((Mul, 0x2), \(r, s, _, _, _, _) -> mul r s)
+  , ((Div, 0x3), \(r, s, _, _, _, _) -> div r s)
+  , ((And, 0x4), \(r, s, _, _, _, _) -> and r s)
+  , ((Nor, 0x5), \(r, s, _, _, _, _) -> nor r s)
+  , ((Shl, 0x6), \(r, s, _, _, _, _) -> shl r s)
+  , ((Shr, 0x7), \(r, s, _, _, _, _) -> shr r s)
+  , ((Mov, 0x8), \(r, s, _, _, _, _) -> mov r s)
+  , ((Sto, 0x9), \(r, s, _, _, _, _) -> sto r s)
+  , ((Jal, 0xA), \(r, s, _, _, _, _) -> jal r s)
+  , ((Ccc, 0xC), \(r, _, x, _, c, _) -> cCC r c x)
+  , ((Ldi, 0xD), \(r, _, _, i, _, _) -> ldi r i)
+  , ((Sys, 0xF), \(r, _, x, _, _, f) -> sys r f x)
+  ]
+
+encodeOpdS :: OperandS -> Word8
+encodeOpdS (OpdSImm imm7) = fromIntegral imm7
+encodeOpdS (OpdSReg mode reg) = encodeMode mode .|. fromIntegral reg
 decodeOpdS :: Word8 -> OperandS
-decodeOpdS x =
-  let imm7 = fromIntegral $ x .&. 0x7F
-      mode = case (x `shiftR` 4) .&. 0x7 of
-        0 -> Direct
-        1 -> IndexedByte
-        2 -> LoIndirect
-        3 -> HiIndirect
-        4 -> IndexedIndirect
-        5 -> Stack
-        6 -> Env
-        7 -> Frame
-        _ -> error "unknown addressing mode"
-   in if x .&. 0x80 == 0
+decodeOpdS w8 =
+  let imm7 = fromIntegral $ w8 .&. 0x7F
+      mode = decodeMode w8
+      reg  = fromIntegral $ w8 .&. 0xF
+   in if w8 .&. 0x80 == 0
       then OpdSImm imm7
-      else OpdSReg mode (fromIntegral $ x .&. 0xF)
+      else OpdSReg mode reg
 
+encodeMode :: AddrMode -> Word8
+encodeMode m = case lookup m codecMode of
+  Just w8 -> w8
+  Nothing -> error $ "internal: addressing mode " ++ show m ++ "encoding not defined"
+decodeMode :: Word8 -> AddrMode
+decodeMode w8 = case lookup (w8 .&. 0x70) (swap <$> codecMode) of
+  Just m -> m
+  Nothing -> error $ "unknown addressing mode " ++ show w8
+codecMode :: [(AddrMode, Word8)]
+codecMode =
+  [ (Direct         , 0x00)
+  , (IndexedByte    , 0x10)
+  , (LoIndirect     , 0x20)
+  , (HiIndirect     , 0x30)
+  , (IndexedIndirect, 0x40)
+  , (Stack          , 0x50)
+  , (Env            , 0x60)
+  , (Frame          , 0x70)
+  ]
+
+encodeOpdX :: OperandX -> Word8
+encodeOpdX x = case lookup x codecOpdX of
+  Just w8 -> w8
+  Nothing -> error $ "internal: x-operand " ++ show x ++ "encoding not defined"
 decodeOpdX :: Word8 -> OperandX
-decodeOpdX x =
-  let imm4 = fromIntegral $ x .&. 0x0F
-   in if x .&. 0x80 == 0
-      then OpdXImm imm4
-      else OpdXReg (fromIntegral $ x .&. 0xF)
+decodeOpdX w8 = case lookup (w8 .&. 0x8F) (swap <$> codecOpdX) of
+  Just x -> x
+  Nothing -> error $ "unknown x-operand: " ++ show w8
+codecOpdX :: [(OperandX, Word8)]
+codecOpdX =
+  [ (OpdXImm $ fromIntegral imm, imm)
+  | imm <- [0x00..0x0F]
+  ] ++
+  [ (OpdXReg $ fromIntegral reg, 0x80 .|. reg)
+  | reg <- [0x00..0x0F]
+  ]
 
+encodeCond :: Condition -> Word4
+encodeCond f = case lookup f codecCond of
+  Just w4 -> w4
+  Nothing -> error $ "internal: condition " ++ show f ++ "encoding not defined"
 decodeCond :: Word4 -> Condition
-decodeCond 0 = ILtZ
-decodeCond 1 = UEq
-decodeCond 2 = ULt
-decodeCond 3 = ULe
-decodeCond 4 = UGt
-decodeCond 5 = UGe
-decodeCond 6 = UNe
-decodeCond _ = error "unknown condition"
+decodeCond w4 = case lookup w4 (swap <$> codecCond) of
+  Just f -> f
+  Nothing -> error $ "unknown condition: " ++ show w4
+codecCond :: [(Condition, Word4)]
+codecCond =
+  [ (ILtZ, 0)
+  , (UEq , 1)
+  , (ULt , 2)
+  , (ULe , 3)
+  , (UGt , 4)
+  , (UGe , 5)
+  , (UNe , 6)
+  ]
 
+encodeSysfunc :: SysFunc -> Word4
+encodeSysfunc f = case lookup f codecSysfunc of
+  Just w4 -> w4
+  Nothing -> error $ "internal: sysfunc " ++ show f ++ "encoding not defined"
 decodeSysfunc :: Word4 -> SysFunc
-decodeSysfunc 0 = Get
-decodeSysfunc 1 = Put
-decodeSysfunc 7 = Hlt
-decodeSysfunc _ = error "unknown system code"
+decodeSysfunc w4 = case lookup w4 (swap <$> codecSysfunc) of
+  Just f -> f
+  Nothing -> error $ "unknown sysfunc: " ++ show w4
+codecSysfunc :: [(SysFunc, Word4)]
+codecSysfunc =
+  [ (Get, 0)
+  , (Put, 1)
+  , (Hlt, 7)
+  ]
 
 ---------------------------------
 ------ Typed Tagless Final ------
 ---------------------------------
 
 class Instruction r where
+  {-# MINIMAL instr |
+   add, sub, mul, div, and, nor, shl, shr, mov, sto, jal, cCC, ldi, sys #-}
+
+  instr :: Opcode -> AllOpds -> r
+
   add :: OperandR -> OperandS -> r
   sub :: OperandR -> OperandS -> r
   mul :: OperandR -> OperandS -> r
@@ -312,19 +396,55 @@ class Instruction r where
   mov :: OperandR -> OperandS -> r
   sto :: OperandR -> OperandS -> r
   jal :: OperandR -> OperandS -> r
-  -- idk
   cCC :: OperandR -> Condition -> OperandX -> r
   ldi :: OperandR -> Word8 -> r
-  -- idk
   sys :: OperandR -> SysFunc -> OperandX -> r
 
+  instr Add (r, s, _, _, _, _) = add r s
+  instr Sub (r, s, _, _, _, _) = sub r s
+  instr Mul (r, s, _, _, _, _) = mul r s
+  instr Div (r, s, _, _, _, _) = div r s
+  instr And (r, s, _, _, _, _) = and r s
+  instr Nor (r, s, _, _, _, _) = nor r s
+  instr Shl (r, s, _, _, _, _) = shl r s
+  instr Shr (r, s, _, _, _, _) = shr r s
+  instr Mov (r, s, _, _, _, _) = mov r s
+  instr Sto (r, s, _, _, _, _) = sto r s
+  instr Jal (r, s, _, _, _, _) = jal r s
+  instr Ccc (r, _, x, _, c, _) = cCC r c x
+  instr Ldi (r, _, _, i, _, _) = ldi r i
+  instr Sys (r, _, x, _, _, f) = sys r f x
+  add r s = instr Add $ fmtRS r s
+  sub r s = instr Sub $ fmtRS r s
+  mul r s = instr Mul $ fmtRS r s
+  div r s = instr Div $ fmtRS r s
+  and r s = instr And $ fmtRS r s
+  nor r s = instr Nor $ fmtRS r s
+  shl r s = instr Shl $ fmtRS r s
+  shr r s = instr Shr $ fmtRS r s
+  mov r s = instr Mov $ fmtRS r s
+  sto r s = instr Sto $ fmtRS r s
+  jal r s = instr Jal $ fmtRS r s
+  cCC r c x = instr Ccc $ fmtRFX r (Left c) x
+  ldi r i = instr Ldi $ fmtRI r i
+  sys r f x = instr Sys $ fmtRFX r (Right f) x
+
+data Opcode = Add | Sub | Mul | Div
+            | And | Nor | Shl | Shr
+            | Mov | Sto | Jal
+            | Ccc | Ldi       | Sys
+  deriving(Eq, Show)
+
 data OperandR = OpdR Word4
+  deriving(Eq, Show)
 data OperandS
   = OpdSImm Word7
   | OpdSReg AddrMode Word4
+  deriving(Eq, Show)
 data OperandX
   = OpdXImm Word4
   | OpdXReg Word4
+  deriving(Eq, Show)
 
 data AddrMode
   = Direct
@@ -335,20 +455,44 @@ data AddrMode
   | Stack -- [sp - s*4] 0xD for dump
   | Env -- [ep + s*4] 0xE
   | Frame -- [fp + s*4] 0xF
+  deriving (Eq, Show)
 
 data Condition
   = ILtZ   -- FIXME not ILt?
   | UEq | UNe
   | ULt | ULe | UGt | UGe
+  deriving (Eq, Show)
 
 data SysFunc
   = Get | Put
   | Hlt
+  deriving (Eq, Show)
+
+instance Instruction Void where
+  instr _ _ = error "attempt to use Instruction Void"
+
+------ Instruction Formats ------
+
+type AllOpds = (OperandR, OperandS, OperandX, Word8, Condition, SysFunc)
+
+fmtRS  :: OperandR                             -> OperandS -> AllOpds
+fmtRFX :: OperandR -> Either Condition SysFunc -> OperandX -> AllOpds
+fmtRI  :: OperandR                             -> Word8    -> AllOpds
+
+fmtRS  r           s = zeroOpds & \(_, _, x, i, c, f) -> (r, s, x, i, c, f)
+fmtRFX r (Left c)  x = zeroOpds & \(_, s, _, i, _, f) -> (r, s, x, i, c, f)
+fmtRFX r (Right f) x = zeroOpds & \(_, s, _, i, c, _) -> (r, s, x, i, c, f)
+fmtRI  r           i = zeroOpds & \(_, s, x, _, c, f) -> (r, s, x, i, c, f)
+
+zeroOpds :: AllOpds
+zeroOpds = (OpdR 0, OpdSImm 0, OpdXImm 0, 0, ILtZ, Get)
 
 ------ Architectural Data Types ------
 
 newtype Word4 = W4 { unW4 :: Word8 }
   deriving (Eq, Ord, Real)
+instance Show Word4 where
+  show = show . unW4
 instance Enum Word4 where
   fromEnum = fromEnum . unW4
   toEnum = W4 . (.&. 0xF) . fromIntegral
@@ -365,6 +509,8 @@ instance Integral Word4 where
 
 newtype Word7 = W7 { unW7 :: Word8 }
   deriving (Eq, Ord, Real)
+instance Show Word7 where
+  show = show . unW7
 instance Enum Word7 where
   fromEnum = fromEnum . unW7
   toEnum = W7 . (.&. 0x7F) . fromIntegral
@@ -388,8 +534,8 @@ cycle = cycle1 >> cycle
 
 cycle1 :: Vm ()
 cycle1 = do
-  instr <- fetch
-  let action = decode instr
+  code <- fetch
+  let action = decodeIntruction code
   action
 
 fetch :: Vm Word16
@@ -604,7 +750,46 @@ vmHalt code = Vm $ liftIO $ exitWith $ ExitFailure (fromIntegral code)
 
 -- TODO for now, I'm just doing explicit two passes, but this could be done in a MonadFix I think
 
--- newtype Asm a = Asm { unAsm :: Map String Word16 -> Either (AsmError, (Map String Word16, a)) }
+newtype Asm a = Asm { unAsm :: State AsmSt a }
+  deriving(Functor, Applicative, Monad, MonadFix)
+data AsmSt = AsmSt
+  { asmTextSize :: Word32
+  , asmOut :: [Word8]
+  }
+
+runAsm :: Asm a -> AsmSt
+runAsm action = adapt $ execState (unAsm action) st0
+  where
+  adapt st = st
+    { asmOut = reverse st.asmOut
+    }
+  st0 = AsmSt
+    { asmTextSize = 0
+    , asmOut = []
+    }
+
+asmHere_ :: Asm any -> Asm (Word32, Word32)
+asmHere_ action = do
+  here <- Asm $ gets asmTextSize
+  _ <- action
+  next <- Asm $ gets asmTextSize
+  pure (here, next)
+
+asmByte :: Word8 -> Asm ()
+asmByte b = Asm $ modify $ \st -> st
+  { asmTextSize = st.asmTextSize + 1
+  , asmOut = b : st.asmOut
+  }
+
+asmInstr :: Word16 -> Asm ()
+asmInstr code = do
+  asmByte $ fromIntegral (code .&. 0xFF)
+  asmByte $ fromIntegral (code `shiftR` 8)
+
+asmWord :: Word32 -> Asm ()
+asmWord word = forM_ [3,2,1,0] $ \i -> do
+  let byte = (word `shiftL` (8*i)) .&. 0xFF
+  asmByte $ fromIntegral byte
 
 ---------------------
 ------ Helpers ------
@@ -612,6 +797,9 @@ vmHalt code = Vm $ liftIO $ exitWith $ ExitFailure (fromIntegral code)
 
 both :: (a -> b) -> (a, a) -> (b, b)
 both f (x, y) = (f x, f y)
+
+swap :: (a, b) -> (b, a)
+swap (a, b) = (b, a)
 
 -- | Bitwise nor.
 infixl 5 .~|.
