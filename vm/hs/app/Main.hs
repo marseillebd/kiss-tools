@@ -355,10 +355,7 @@ decodeMode w8 = case lookup (w8 .&. 0x70) (swap <$> codecMode) of
 codecMode :: [(AddrMode, Word8)]
 codecMode =
   [ (Direct         , 0x00)
-  , (IndexedByte    , 0x10)
-  , (LoIndirect     , 0x20)
-  , (HiIndirect     , 0x30)
-  , (IndexedIndirect, 0x40)
+  , (Byte           , 0x10)
   , (Stack          , 0x50)
   , (Env            , 0x60)
   , (Frame          , 0x70)
@@ -488,10 +485,8 @@ data OperandX
 
 data AddrMode
   = Direct
-  | IndexedByte
-  | LoIndirect -- [s & 0xffff] ie car
-  | HiIndirect -- [s >> 16] ie cdr
-  | IndexedIndirect -- [s*4 + r4], cuz ig r4 is the index register, hoping for this mode to be encoded 0xC.
+  | Byte
+  -- TODO gotta think about this one | PcRel -- [sp - s*4] 0xC for program counter
   | Stack -- [sp - s*4] 0xD for dump
   | Env -- [ep + s*4] 0xE
   | Frame -- [fp + s*4] 0xF
@@ -641,16 +636,9 @@ lea :: OperandS -> Vm (Either Word32 Word32)
 lea (OpdSImm w7) = pure . Right $ fromIntegral w7
 lea (OpdSReg mode i) = case mode of
   Direct -> Right <$> readReg i
-  IndexedByte -> Left <$> do
-    off <- readReg 0x4
+  Byte -> Left <$> do
     base <- readReg i
-    pure $ 4*base + off
-  LoIndirect -> Right . (.&. 0xFFFF) <$> readReg i
-  HiIndirect -> Right . (`shiftR` 16) <$> readReg i
-  IndexedIndirect -> Right <$> do
-    off <- readReg 0x4
-    base <- readReg i
-    pure (base + off)
+    pure $ base
   Stack -> Right <$> do
     sp <- readReg 0xD
     off <- readReg i
@@ -779,7 +767,7 @@ helloAsm = mdo
     , mov (OpdR 4) (OpdSImm $ fromIntegral atHello)
     , cCC (OpdR 4) UEq (OpdXReg 3)
     , sys (OpdR 0) Hlt (OpdXImm 0)
-    , mov (OpdR 1) (OpdSReg IndexedByte 0)
+    , mov (OpdR 1) (OpdSReg Byte 0)
     , sys (OpdR 1) Put (OpdXImm 0)
     , add (OpdR 4) (OpdSImm 1)
     , sub (OpdR 0xC) (OpdSImm $ fromIntegral $ atLoopEnd - atMain)
