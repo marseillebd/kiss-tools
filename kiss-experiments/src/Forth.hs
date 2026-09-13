@@ -10,13 +10,15 @@
 module Forth where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.State (StateT, evalStateT, get, gets, put, modify)
+import Control.Monad.State (StateT, evalStateT, gets, modify)
 import Control.Monad (when, forever)
-import Data.List ((!?))
-import Data.Maybe (isJust)
+import Data.List ((!?), uncons)
+import Data.Maybe (isJust, fromMaybe)
 import Data.String (IsString(..))
 import System.Exit (exitSuccess, ExitCode(..), exitWith, die)
 import Text.Read (readMaybe)
+
+import qualified Data.ByteString as BS
 
 -- TODO: so we basically have a forth machine
 -- TODO: now we need a forth compiler, at first just compiling to a Load
@@ -30,6 +32,9 @@ import Text.Read (readMaybe)
 -- This lets us write some assembly under the label `<name>`
 --   to adapt the calling conventions from system to forth for any exported `uf_<name>` labels the compiler emits.
 
+-- NOTE TOS is top-of-stack, NOS is next-on-stack
+-- NOTE while I haven't nseed it, 3OS, 4OS would be 3rd-, 4th-, etc on-stack
+
 ------ a smoke test exe ------
 
 main :: IO ()
@@ -38,11 +43,82 @@ main = do
   let runtime = emptyLoad
         { funs =
           [ ("exit", inj primExit)
+          , ("put.b", inj primPutStdout)
+
+          , ("ifnz", inj primIfnz)
+          , ("jump", inj primJump)
           , ("call", inj primCall)
+
+          , ("-", inj primSub)
+
+          , ("nROT", inj primNRot)
+          , ("nDUP", inj primNDup)
+          , ("nDROP", inj primNDrop)
+          , ("nROT.c", inj primNRotC)
+          , ("nDUP.c", inj primNDupC)
+          , ("nDROP.c", inj primNDropC)
+          , ("popC", inj primPopCtrl)
+          , ("pushC", inj primPushCtrl)
+
+          , ("DEBUG", inj primDebugData)
           ]
         }
   let progText = unlines
-        [ ":fun _start 42 ' exit call ;"
+        [ ":fun _start testloop funkexit ;"
+        , ":fun say 65 put.b 10 put.b ;"
+
+        , ":fun funkexit"
+        ,   "' exit DUP"
+        ,   "0 42 1 ifnz"
+        ,   "ROT call"
+        , ";"
+
+        -- (i) -> (i-1)
+        , ":fun testloop.body say 1 - ;"
+        -- () -> ()
+        , ":fun testloop"
+        ,   "3 ' testloop.body ' DUP"
+            -- (ctr, body, test)
+        ,   "while"
+            -- (0)
+        ,   "1 nDROP"
+            -- ()
+        , ";"
+
+        -- here's the hypothesis: that I can use the control stack manipulations with ifnz to get loops
+        -- NOTE and it freaking works!!!!!! yooooooo! let's gooooooo!!!!!!
+        -- (body, test) -> ()
+        , ":fun while"
+        ,   "SWAP pushC DUP pushC"
+            -- (test){body, test}
+        ,   "call"
+            -- (cond){body, test}
+        ,   "' while.onFalse ' while.onTrue ROT"
+            -- (onFalse, onTrue, cond){body, test}
+        ,   "ifnz"
+            -- (handler){body, test}
+        ,   "jump" -- tail-call into either the body wrapper or the while cleanup
+        , ";"
+        -- (){body, test} -> ()
+        , ":fun while.onTrue"
+        ,   "2 nDUP.c popC"
+            -- (body){body, test}
+        ,   "call"
+            -- (){body, test}
+        ,   "popC popC SWAP"
+            -- (body, test)
+        ,   "' while jump" -- tail-call while to continue the test-body loop
+        , ";"
+        -- (){body, test} -> ()
+        , ":fun while.onFalse"
+        ,   "1 nDROP.c"
+        ,   "1 nDROP.c"
+        , ";"
+
+        , ":fun DUP 1 nDUP ;"
+        , ":fun ROT 3 nROT ;"
+        , ":fun SWAP 2 nROT ;"
+        , ":fun NOP ;"
         ]
   prog <- case compileHs runtime progText of
     Left msg -> die msg
@@ -56,7 +132,7 @@ main = do
 data Machine = M
   { pc :: !ProgramCounter
   , dStack :: ![Value]
-  , cStack :: ![ProgramCounter]
+  , cStack :: ![Value] -- NOTE this will normally be ProgramCounter, but it could hold function pointers, and there's no reason not to hold ordinary values as long as we don't try to jump to them
   , code :: ![(String, Thread)]
   , mem :: ![(String, Variable)]
   }
@@ -64,6 +140,7 @@ data Machine = M
 data Value
   = Data Integer
   | Ptr String
+  | IPtr ProgramCounter
   | VPtr (String, Int) -- varname + offset
   deriving (Show)
 
@@ -72,86 +149,128 @@ type Variable = [Value]
 data Thread
   = PT PrimThread
   | UT UserThread
-data PrimThread = PrimThread { prim :: Forth () }
-data UserThread = UserThread { instrs :: [Instr] }
+data PrimThread = PrimThread { prim :: !(Forth ()) }
+data UserThread = UserThread { threadName :: !String, instrs :: ![Instr] }
 data Instr
   = Subr String
   | Imm Value
   | Return -- FIXME I dunno why I couldn't GADT this one to make it not constructable in actual lists of Instrs
   -- NOTE I thought about including "skip over a function that is defined here",
   -- but I decided againt is because that's harder to inspect the assembly/machine code for.
+  deriving(Show)
 
 ------ execution ------
 
 newtype Forth a = F { unF :: StateT Machine IO a }
   deriving (Functor, Applicative, Monad, MonadIO)
 
-type ProgramCounter = (UserThread, Int)
-fetch :: Forth Instr
-fetch = F $ do
-  m <- get
-  let (thd, off) = m.pc
-  case thd.instrs !? off of
-    Just op -> do
-      put $ m{pc = (thd, off+1)}
-      pure op
-    Nothing -> pure Return
-
-pushData :: Value -> Forth ()
-pushData v = F $ do
-  modify $ \m -> m{ dStack = v : m.dStack }
-popData :: Forth Value
-popData = F $ do
-  m <- get
-  case m.dStack of
-    tos : rest -> do
-      put m{ dStack = rest }
-      pure tos
-    [] -> error "stack underflow"
-
--- NOTE TOS is top-of-stack, NOS is next-on-stack
--- NOTE while I haven't nseed it, 3OS, 4OS would be 3rd-, 4th-, etc on-stack
-
-callSubr :: UserThread -> Forth ()
-callSubr thd = F $ modify $ \m -> m
-  { pc = (thd, 0)
-  , cStack = m.pc : m.cStack
-  }
-retSubr :: Forth ()
-retSubr = F $ modify $ \m -> case m.cStack of
-  k : ctrl -> m
-    { pc = k
-    , cStack = ctrl
-    }
-  [] -> error "control stack undeflow"
+data ProgramCounter
+  = UPC (UserThread, Int)
+  | PPC PrimThread
+instance Show ProgramCounter where
+  show (UPC (thd, off)) = "UPC " ++ show thd.threadName <> " + " <> show off
+  show  (PPC _) = "PPC <unknown>"
 
 step :: Forth ()
-step = fetch >>= \case
-  Subr name -> do
-    m <- F get
-    case lookup name m.code of
-      Just (UT subr) -> callSubr subr
-      Just (PT subr) -> subr.prim
-      Nothing -> error $ "no such subroutine: " <> show name
-  Imm v -> pushData v
-  Return -> retSubr
+step = do
+  getPc >>= \case
+    UPC (thd, off) -> do
+      op <- case thd.instrs !? off of
+        Just op -> do
+          setPc $ UPC (thd, off+1)
+          pure op
+        Nothing -> pure Return
+      case op of
+        Subr name -> findThread name >>= callSubr
+        Imm v -> pushData v
+        Return -> retSubr
+    PPC op -> op.prim >> retSubr
+
+callCont :: ProgramCounter -> Forth ()
+callCont k = do
+  pushCtrl =<< IPtr <$> getPc
+  setPc k
+callSubr :: Thread -> Forth ()
+callSubr (UT thd) = callCont $ UPC (thd, 0)
+callSubr (PT subr) = subr.prim
+
+retSubr :: Forth ()
+retSubr = do
+  k <- popCtrl >>= \case
+    -- FIXME if popCtrl fails, I want to just exit the program with either TOS or else success
+    IPtr it -> pure it
+    Ptr name -> findThread name >>= \case
+      UT it -> pure $ UPC (it, 0)
+      PT op -> pure $ PPC op
+    other -> error $ "type error: expecting continuation, got: " <> show other
+  setPc k
+
+------ support ------
+
+findThread :: String -> Forth Thread
+findThread name = F $ do
+  tbl <- gets (.code)
+  case lookup name tbl of
+    Just thd -> pure thd
+    Nothing -> error $ "no such subroutine: " <> show name
+
+withData :: ([Value] -> (a, [Value])) -> Forth a
+withData f = F $ do
+  (a, xs) <- gets $ f . (.dStack)
+  modify $ \m -> m{dStack = xs}
+  pure a
+-- common withData operations
+pushData :: Value -> Forth ()
+pushData v = withData $ \stack -> ((), v:stack)
+popData :: Forth Value
+popData = withData $ fromMaybe (error "stack underflow") . uncons
+
+withCtrl :: ([Value] -> (a, [Value])) -> Forth a
+withCtrl f = F $ do
+  (a, xs) <- gets $ f . (.cStack)
+  modify $ \m -> m{cStack = xs}
+  pure a
+-- common withCtrl operations
+pushCtrl :: Value -> Forth ()
+pushCtrl v = withCtrl $ \stack -> ((), v:stack)
+popCtrl :: Forth Value
+popCtrl = withCtrl $ fromMaybe (error "control stack underflow") . uncons
+
+getPc :: Forth ProgramCounter
+getPc = F $ gets (.pc)
+setPc :: ProgramCounter -> Forth ()
+setPc target = F $ modify $ \m -> m{pc = target}
+
+expectInt :: String -> Value -> Forth Integer
+expectInt _ (Data i) = pure i
+expectInt msg other = error $ msg <> ":\n\ttype error: expecing int, got " <> show other
+
+expectIndex :: String -> Value -> Forth Int
+expectIndex _ (Data i) | fromInteger @Int i > 0 = pure $ fromInteger i - 1
+expectIndex msg other = error $ msg <> "\n\ttype error: expecing positive int, got " <> show other
+
+expectCont :: Value -> Forth ProgramCounter
+expectCont (Ptr name) = findThread name >>= \case
+  UT thd -> pure $ UPC (thd, 0)
+  PT op -> pure $ PPC op
+expectCont (IPtr it) = pure it
+expectCont other = error $ "type error: expected function pointer, got " <> show other
 
 ------------------------
 ------ primitives ------
 ------------------------
+
+primDebugData :: Forth ()
+primDebugData = do
+  stack <- F $ gets (.dStack)
+  liftIO $ print stack
 
 -- NOTE if the machine were implemented in assembly, these would also be,
 -- though perhaps as a library that can be linked with the compiler output
 
 ------ stack manipulation ------
 
--- TODO: npeek -- look n entries down (1-indexed) and copy it to tos
--- TODO: ndrop -- look n entries down and remove it from the stack
--- TODO: nrot -- look n entries down (1-indexed) and rotate it to tos
---            -- ie peekn(i) dropn(i+1)
 -- TODO: nmove -- pop tos and replace n entries down (from now) with the result
--- TODO: ndup -- nmove, but don't drop tos
---            -- ie 0 ndup === dup
 -- TODO: npush -- pop tos and insert it so that it is n entries down, moving everything else up
 
 -- TODO: n{peek,drop,&c}.c -- same stuff but act on the control stack
@@ -159,21 +278,71 @@ step = fetch >>= \case
 -- TODO: n{peek,pop}.dc -- same stuff but move values from data to control
 -- TODO: or the motion ones could be save, restore, look, idk
 
+--- the data stack ---
+
+primNDup :: Forth ()
+primNDup = do
+  i <- popData >>= expectIndex "ndup"
+  v <- withData $ \stack -> (fromMaybe (error "stack underflow") (stack !? i), stack)
+  pushData v
+
+primNRot :: Forth ()
+primNRot = do
+  i <- popData >>= expectIndex "nrot"
+  v <- withData $ \stack -> fromMaybe (error "stack underflow") (stack !< i)
+  pushData v
+
+primNDrop :: Forth ()
+primNDrop = do
+  i <- popData >>= expectIndex "ndrop"
+  _ <- withData $ \stack -> fromMaybe (error "stack underflow") (stack !< i)
+  pure ()
+
+--- the control stack ---
+
+primNDupC :: Forth ()
+primNDupC = do
+  i <- popData >>= expectIndex "ndup.c"
+  v <- withCtrl $ \stack -> (fromMaybe (error "control stack underflow") (stack !? i), stack)
+  pushCtrl v
+
+primNRotC :: Forth ()
+primNRotC = do
+  i <- popData >>= expectIndex "nrot.c"
+  v <- withCtrl $ \stack -> fromMaybe (error "control stack underflow") (stack !< i)
+  pushCtrl v
+
+primNDropC :: Forth ()
+primNDropC = do
+  i <- popData >>= expectIndex "ndrop.c"
+  _ <- withCtrl $ \stack -> fromMaybe (error "control stack underflow") (stack !< i)
+  pure ()
+
+--- between stacks ---
+
+primPopCtrl :: Forth ()
+primPopCtrl = popCtrl >>= pushData
+
+primPushCtrl :: Forth ()
+primPushCtrl = popData >>= pushCtrl
+
 ------ control flow ------
 
 -- TODO: if, probably while and maybe some other basic control flow
 -- (when/unless, fold, do-while, idk, perhaps somehow switch or cond)
 
+primJump :: Forth ()
+primJump = popData >>= expectCont >>= setPc
+
 primCall :: Forth ()
-primCall = do
-  name <- popData >>= \case
-    Ptr name -> pure name
-    other -> error $ "type error: expected function pointer, got " <> show other
-  defs <- F $ gets (.code)
-  case lookup name defs of
-    Just (UT it) -> callSubr it
-    Just (PT it) -> it.prim
-    Nothing -> error $ "no such function: " <> show name
+primCall = popData >>= expectCont >>= callCont
+
+primIfnz :: Forth ()
+primIfnz = do
+  cond <- popData >>= expectInt "ifnz condition"
+  onNz <- popData
+  onZ <- popData
+  pushData $ if cond == 0 then onZ else onNz
 
 ------ arithmetic and logic ------
 
@@ -183,13 +352,24 @@ primCall = do
 -- TODO: cmp, {n,}eq, {i,u}{l,g}{t,e}
 -- TODO: something about wide/carry/borrow arithmetic
 
+primSub :: Forth ()
+primSub = do
+  minuend <- popData >>= expectInt "-"
+  subtrahend <- popData >>= expectInt "-"
+  pushData $ Data (subtrahend - minuend)
+
 ------ environment ------
 
 primExit :: Forth ()
-primExit = popData >>= \case
-  Data 0 -> liftIO exitSuccess
-  Data err -> liftIO $ exitWith (ExitFailure $ fromInteger err)
-  other -> error $ "type error in exit: expecting int, got " <> show other
+primExit = popData >>= expectInt "exit" >>= \case
+  0 -> liftIO exitSuccess
+  err -> liftIO $ exitWith (ExitFailure $ fromInteger err)
+
+primPutStdout :: Forth ()
+primPutStdout = do
+  tos <- popData >>= expectInt "put"
+  liftIO $ BS.putStr . BS.singleton $ fromInteger tos
+
 
 ---------------------------------
 ------ Haskell Integration ------
@@ -218,7 +398,7 @@ enterForth env action = do
   exitSuccess
   where
   m0 thd0 =  M
-    { pc = (thd0, 0)
+    { pc = UPC (thd0, 0)
     , dStack = []
     , cStack = []
     , code = env.funs
@@ -241,7 +421,7 @@ compileHs acc0 input = do
       checkName acc name
       body <- loopFun [] bodyStrs
       loop acc
-        { funs = (name, inj @Thread body) : acc.funs
+        { funs = (name, inj $ UserThread name body) : acc.funs
         } rest
     ([], (";":_)) -> Left "missing function name"
     (_, _) -> Left "unterminated function definition"
@@ -295,13 +475,25 @@ instance IsString Instr where
     Just i -> Imm $ Data i
     Nothing -> Subr str -- TODO check constraints on subroutine names
 instance IsString Thread where
-  fromString str = UT . UserThread $ fromString <$> words str
+  fromString str = UT . UserThread "<unknown>" $ fromString <$> words str
 
 class Inj to from where inj :: from -> to
 
 instance Inj PrimThread (Forth ()) where inj = PrimThread
 instance Inj Thread PrimThread where inj = PT
 instance Inj Thread (Forth ()) where inj = inj . inj @PrimThread
-instance Inj UserThread [Instr] where inj = UserThread
+instance Inj UserThread [Instr] where inj = UserThread "<unknown>"
 instance Inj Thread UserThread where inj = UT
 instance Inj Thread [Instr] where inj = inj . inj @UserThread
+
+-- indexes into the list and also removes the found element
+infixl 9 !<
+(!<) :: [a] -> Int -> Maybe (a, [a])
+xs0 !< i0
+  | i0 >= 0 = loop [] xs0 i0
+  | otherwise = Nothing
+  where
+  loop pre (x:post) 0 = Just (x, reverse pre <> post)
+  loop pre (x:post) i = loop (x:pre) post (i-1)
+  loop _ [] _ = Nothing
+
