@@ -360,6 +360,14 @@ primSub = do
 
 ------ environment ------
 
+-- NOTE I suppose we can break up the capabilities of an execution environment into a few parts.
+-- - single serial port (basically stdin+stdout), posix serial (add stderr), and multiple serial port (probably for hardware)
+-- - single block device (when there's just a harddrive, or just rom, or just a floppy, whatever), multiple block device
+-- The multiple-serial/block would ofc need some way to discover which ones exist and their capabilities.
+-- Carrying on:
+-- - filesystem (I'm only gonna expose posix)
+-- - plug-and-play ie dynamic block/serial devices
+
 primExit :: Forth ()
 primExit = popData >>= expectInt "exit" >>= \case
   0 -> liftIO exitSuccess
