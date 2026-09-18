@@ -367,6 +367,7 @@ primSub = do
 -- Carrying on:
 -- - filesystem (I'm only gonna expose posix)
 -- - plug-and-play ie dynamic block/serial devices
+-- - some way to discover what RAM is available, and then an allocation interface can be build on top
 
 primExit :: Forth ()
 primExit = popData >>= expectInt "exit" >>= \case
