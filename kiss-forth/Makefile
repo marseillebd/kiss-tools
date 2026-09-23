@@ -1,6 +1,6 @@
 all: main-x64-linux
 
-main-x64-linux: forth_rt-x64.s main-x64-linux.c
+main-x64-linux: forth_rt-x64.s forth_lib-x64.s main-x64-linux.c
 	gcc -fPIC -g -o $@ $^
 
 run: main-x64-linux
