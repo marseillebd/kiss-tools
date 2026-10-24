@@ -1,25 +1,33 @@
 #!/bin/sh
 set -eu
 
+HERE="$(dirname "$0")"
+cd "$HERE"
+
+CC='clang-22'
+CFLAGS='-Wall -fdefer-ts -g -O1 -I.'
+
 # -Df_TRACE adds tracing
-clang-22 -Wall -fdefer-ts -g -O1 -c forth_rt.c forth.c
+# CFLAGS="$CFLAGS -Df_TRACE"
+
+$CC $CFLAGS -c forth_rt.c forth.c
 
 ec=0
 thisEc=0
-for f in test_*.c; do
+for f in testcases/test_*.c; do
   base="${f%.c}"
-  clang-22 -Wall -g -O1 -c "$base.c" -o "$base.o"
-  clang-22 forth.o "$base.o" forth_rt.o -o "$base.exe"
+  $CC $CFLAGS -c "$base.c" -o "$base.o"
+  $CC forth.o "$base.o" forth_rt.o -o "$base.exe"
   {
     set +e
     "./$base.exe"
     thisEc="$?"
     set -e
     if [ "$thisEc" = 0 ]; then
-      echo >&2 "$base ok"
+      echo >&2 "ok   $(basename "$base")"
     else
       ec=1
-      echo >&2 "FAIL ($thisEc): $base"
+      echo >&2 "FAIL ($thisEc): $(basename "$base")"
     fi
   }
 done

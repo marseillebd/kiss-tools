@@ -26,8 +26,8 @@ void f__step(void*);
 #endif
 
 extern const f_Value f_imm[];
+extern const f_Value f_skip[];
 extern const f_Value f_ret[];
-extern const f_Value f_halt[];
 
 ////// Primitives //////
 
@@ -35,7 +35,16 @@ extern const f_Value f_halt[];
   X(jump)                    \
   X(call)                    \
   X(ifnz)                    \
-  X(ZA)
+                             \
+  X(drop)                    \
+  X(pick)                    \
+  X(plop)                    \
+                             \
+  X(ZA)                      \
+  X(ZS)                      \
+  X(ZM)                      \
+  X(ZD)                      \
+  X(ZR)                      \
 
 #define f_DECL_BUILTIN(name) \
   extern const f_Value f_PASTE(F,name)[];
@@ -58,10 +67,16 @@ f_FOREACH_BUILTIN(f_DECL_BUILTIN)
 
 #define IMM(n)                 \
   (f_Value)&f_imm[0],          \
-  (f_Value){ (n) }
+  (f_Value)(n)
 
 #define TICK(name) \
   IMM((f_Value)&f_PASTE(F,name)[0])
+
+// you have to skip over the amount, then the interior will probably be a function and you'll have to skip over its interpreter and return instruction as well as all the calls it includes
+// don't forget that IMM and SKIP take up two words
+#define SKIP(nWords) \
+  (f_Value)&f_skip[0], \
+  (f_Value)(sizeof(f_Value) * nWords)
 
 #endif
 

@@ -2,21 +2,27 @@
   .data
   .align 8
 f_main: # just so the linker doesn't die; once we compile forth, we'll be ok
-  # .quad f__doRet # making _main a synonym for _ret
   .quad f__step
-  .quad f__imm, 70
-  .quad f__imm, 1
-  .quad f__imm, 0, f__imm, 2, f_plop
-  # 0 1
-  .quad f__imm, 137
-  .quad f__imm, 42
-  .quad f__imm, 1
+  .quad f__imm, 70, f__imm, 3
+  # 70 3
+  .quad f__imm, 42, f__imm, 2, f_plop
+  # 42 3
+  .quad f__imm, 0
+  # 42 3 0
+  .quad f__imm, 2, f_roll # rot 42 to the top
+  # 3 0 42
   .quad f__imm, f_ifnz
+  # 3 0 42 ' ifnz
   .quad f_call
-  # 0 1 42||137
+  # 0
+  .quad f__imm, 10, f__imm, 20
+  # 0 10 20
   .quad f__imm, 3, f_pick
+  # 0 10 20 0
   .quad f__imm, 10
+  # 0 10 20 0 10
   .quad f_drop
+  # 0 10 20 0
   .quad f__ret
 
 

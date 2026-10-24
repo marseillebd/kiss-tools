@@ -42,6 +42,14 @@ void f__imm(ST* st) {
   tailcall f__step(st);
 }
 
+void f__skip(ST* st) {
+  TRACE("------ f__skip");
+  f_Value* off_p = V2VP(POP(&st->r)); // the skip amount (immediately after the skip instruction) has been pushed on the return stack
+  st->ip = (f_Value*)((char*)off_p + *off_p); // thus, a zero-length skip must be at least one to jump over the skip amount
+                                // Also, to make things easier on the machine code, skip amount is in bytes rather than words
+  tailcall f__step(st); // this means that we can only skip within a user-defined function
+}
+
 void f__ret(ST* st) {
   TRACE("------ f__ret");
   POP(&st->r); // top of return stack points after the f_ret instruction; it's trash
@@ -98,6 +106,7 @@ f_Value f_main(void) {
 ////// Primitives //////
 
 const f_Value f_imm[] = { (f_Value)f__imm };
+const f_Value f_skip[] = { (f_Value)f__skip };
 const f_Value f_ret[] = { (f_Value)f__ret };
 const f_Value f_stop[] = { (f_Value)f__stop };
 
@@ -126,6 +135,8 @@ void retPrim(ST* st) {
   };
 f_FOREACH_BUILTIN(f__DEF_BUILTIN)
 
+////// Control Flow //////
+
 void f__jump(ST* st) {
   POP(&st->r); // top of return stack points after the Fjump call, but we don't want to return there
   Thread* callee = V2THD(POP(&st->d));
@@ -147,15 +158,45 @@ void f__ifnz(ST* st) {
   tailcall retPrim(st);
 }
 
+////// Stack Manipulation //////
+
+void f__drop(ST* st) {
+  f_Value amt = POP(&st->d);
+  st->d.cur -= amt;
+  if (amt < 0) { st->d.cur = -1; }
+  tailcall retPrim(st);
+}
+
+void f__pick(ST* st) {
+  f_Value depth = POP(&st->d);
+  uintptr_t i = st->d.cur - (depth - 1);
+  // TODO bounds check
+  PUSH(&st->d, st->d.stack[i]);
+  tailcall retPrim(st);
+}
+
+void f__plop(ST* st) {
+  f_Value depth = POP(&st->d);
+  f_Value value = POP(&st->d);
+  uintptr_t i = st->d.cur - (depth - 1);
+  // TODO bounds check
+  st->d.stack[i] = value;
+  tailcall retPrim(st);
+}
+
+////// ALU //////
+
 #define BINOP(operation) \
   f_Value tos = POP(&st->d); \
   f_Value nos = POP(&st->d); \
   PUSH(&st->d, operation); \
   tailcall retPrim(st);
 
-void f__ZA(ST* st) {
-  BINOP(nos + tos);
-}
+void f__ZA(ST* st) { BINOP(nos + tos); }
+void f__ZS(ST* st) { BINOP(nos - tos); }
+void f__ZM(ST* st) { BINOP(nos * tos); }
+void f__ZD(ST* st) { BINOP(nos / tos); }
+void f__ZR(ST* st) { BINOP(nos % tos); }
 
 ////// Tracing Helpers //////
 

@@ -107,5 +107,6 @@ void* V2VP(f_Value addr) {
 
 void f__step(ST* st);
 void f__imm(ST* st);
+void f__skip(ST* st);
 void f__ret(ST* st);
 void f__stop(ST* st);
