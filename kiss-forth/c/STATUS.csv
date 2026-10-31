@@ -18,17 +18,18 @@ jump,Fjump,machine,flow,done
 call,Fcall,machine,flow,done
 while,Fwhile,forth,flow,todo
 
-drop,Fdrop,machine,stack,todo
-pick,Fpick,machine,stack,todo
-plop,Fplop,machine,stack,todo
-roll,Froll,machine,stack,todo
--roll,FZSroll,machine,stack,todo
-dup,Fdup,forth,stack,todo
+ndrop,Fdrop,machine,stack,done
+pick,Fpick,machine,stack,done
+plop,Fplop,machine,stack,done
+roll,Froll,machine,stack,done
+-roll,FZSroll,machine,stack,done
+drop,Fdrop,forth,stack,done
+dup,Fdup,forth,stack,done
 over,Fover,forth,stack,todo
-swap,Fswap,forth,stack,todo
-rot,Frot,forth,stack,todo
+swap,Fswap,forth,stack,done
+rot,Frot,forth,stack,done
 nip,Fnip,forth,stack,todo
--rot,FZSrot,forth,stack,todo
+-rot,FZSrot,forth,stack,done
 tuck,Ftuck,forth,stack,todo
 
 r.drop,FrZ_drop,machine,rstack,todo

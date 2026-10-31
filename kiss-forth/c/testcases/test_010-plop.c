@@ -6,6 +6,6 @@ DEFUN(main,
   IMM(20),
   IMM(30),
   IMM(0), IMM(3), DO(plop),
-  IMM(2), DO(drop),
+  IMM(2), DO(ndrop),
 )
 

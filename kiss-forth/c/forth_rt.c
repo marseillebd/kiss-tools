@@ -160,12 +160,16 @@ void f__ifnz(ST* st) {
 
 ////// Stack Manipulation //////
 
-void f__drop(ST* st) {
+void f__ndrop(ST* st) {
   f_Value amt = POP(&st->d);
   st->d.cur -= amt;
   if (amt < 0) { st->d.cur = -1; }
   tailcall retPrim(st);
 }
+
+DEFUN(drop,
+  IMM(1), DO(ndrop),
+)
 
 void f__pick(ST* st) {
   f_Value depth = POP(&st->d);
@@ -175,6 +179,9 @@ void f__pick(ST* st) {
   tailcall retPrim(st);
 }
 
+DEFUN(dup,
+  IMM(1), DO(pick),
+)
 void f__plop(ST* st) {
   f_Value depth = POP(&st->d);
   f_Value value = POP(&st->d);
@@ -183,6 +190,40 @@ void f__plop(ST* st) {
   st->d.stack[i] = value;
   tailcall retPrim(st);
 }
+
+void f__roll(ST* st) {
+  f_Value depth = POP(&st->d);
+  uintptr_t i = st->d.cur - (depth - 1);
+  // TODO bounds check
+  f_Value oldBottom = st->d.stack[i];
+  for (; i < st->d.cur; i++) {
+    st->d.stack[i] = st->d.stack[i+1];
+  }
+  st->d.stack[st->d.cur] = oldBottom;
+}
+
+void f__ZSroll(ST* st) {
+  f_Value depth = POP(&st->d);
+  uintptr_t lowest = st->d.cur - (depth - 1);
+  // TODO bounds check
+  f_Value oldTop = st->d.stack[st->d.cur];
+  for (uintptr_t i = st->d.cur; i > lowest; i--) {
+    st->d.stack[i] = st->d.stack[i-1];
+  }
+  st->d.stack[lowest] = oldTop;
+}
+
+DEFUN(swap,
+  IMM(2), DO(roll),
+)
+
+DEFUN(rot,
+  IMM(3), DO(roll),
+)
+
+DEFUN(ZSrot,
+  IMM(3), DO(ZSroll),
+)
 
 ////// ALU //////
 

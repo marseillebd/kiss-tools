@@ -36,9 +36,11 @@ extern const f_Value f_ret[];
   X(call)                    \
   X(ifnz)                    \
                              \
-  X(drop)                    \
+  X(ndrop)                   \
   X(pick)                    \
   X(plop)                    \
+  X(roll)                    \
+  X(ZSroll)                  \
                              \
   X(ZA)                      \
   X(ZS)                      \
@@ -46,20 +48,28 @@ extern const f_Value f_ret[];
   X(ZD)                      \
   X(ZR)                      \
 
-#define f_DECL_BUILTIN(name) \
-  extern const f_Value f_PASTE(F,name)[];
+#define f_FOREACH_STDLIB(X)  \
+  X(drop)                    \
+  X(dup)                     \
+  X(swap)                    \
+  X(rot)                     \
+  X(ZSrot)                   \
 
-f_FOREACH_BUILTIN(f_DECL_BUILTIN)
+#define f_DECL_STDLIB(name) \
+  extern const f_Value f_PASTE(F,name)[];
+f_FOREACH_BUILTIN(f_DECL_STDLIB)
+f_FOREACH_STDLIB(f_DECL_STDLIB)
+
 
 ////// Hand Compiling Helpers //////
 
 #ifndef F_HAND_MACROS
 
-#define DEFUN(name, ...)        \
-  f_Value f_PASTE(F,name)[] = { \
-    (f_Value)&f__step,          \
-    __VA_ARGS__                 \
-    (f_Value)&f_ret[0],         \
+#define DEFUN(name, ...)              \
+  const f_Value f_PASTE(F,name)[] = { \
+    (f_Value)&f__step,                \
+    __VA_ARGS__                       \
+    (f_Value)&f_ret[0],               \
   };
 
 #define DO(name)               \
