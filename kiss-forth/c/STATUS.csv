@@ -25,26 +25,27 @@ roll,Froll,machine,stack,done
 -roll,FZSroll,machine,stack,done
 drop,Fdrop,forth,stack,done
 dup,Fdup,forth,stack,done
-over,Fover,forth,stack,todo
+over,Fover,forth,stack,done
 swap,Fswap,forth,stack,done
 rot,Frot,forth,stack,done
-nip,Fnip,forth,stack,todo
+nip,Fnip,forth,stack,done
 -rot,FZSrot,forth,stack,done
 tuck,Ftuck,forth,stack,todo
 
-r.drop,FrZ_drop,machine,rstack,todo
-r.save,FrZ_save,machine,rstack,todo
-r.pick,FrZ_pick,machine,rstack,todo
-r.plop,FrZ_pick,machine,rstack,todo
->r,FZGr,forth,rstack,todo
-r>,FrZG,forth,rstack,todo
+r.ndrop,FrZ_drop,forth,rstack,done
+r.save,FrZ_save,machine,rstack,done
+r.load,FrZ_load,machine,rstack,done
+r.pick,FrZ_pick,machine,rstack,done
+r.plop,FrZ_pick,machine,rstack,done
+>r,FZGr,forth,rstack,done
+r>,FrZG,forth,rstack,done
 
 +,FZA,machine,alu,done
 -,FZS,machine,alu,done
 *,FZM,machine,alu,done
 /,FZD,machine,alu,done
-%,FZR,machine,alu,done
-/%,FZDZR,forth,alu,todo
+%,FZR,forth,alu,done
+/%,FZDZR,machine,alu,done
 neg,Fneg,forth,alu,todo
 and,Fand,machine,alu,todo
 or,For,machine,alu,todo
@@ -56,5 +57,8 @@ s.shr,FsZ_shr,machine,alu,todo
 
 @,FZt,machine,memory,todo
 !,FZB,machine,memory,todo
-alloc,Falloc,machine,memory,todo
+balloc,Fballoc,machine,memory,todo
 free,Ffree,machine,memory,todo
+asize,Fasize,machine,memory,todo
+aalloc,Faalloc,forth,memory,todo
+

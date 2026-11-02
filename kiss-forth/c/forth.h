@@ -42,18 +42,30 @@ extern const f_Value f_ret[];
   X(roll)                    \
   X(ZSroll)                  \
                              \
+  X(rZ_ndrop)                \
+  X(rZ_save)                 \
+  X(rZ_load)                 \
+  X(rZ_pick)                 \
+  X(rZ_plop)                 \
+  X(ZGr)                     \
+  X(rZG)                     \
+                             \
   X(ZA)                      \
   X(ZS)                      \
   X(ZM)                      \
-  X(ZD)                      \
-  X(ZR)                      \
+  X(ZDZR)                    \
 
 #define f_FOREACH_STDLIB(X)  \
   X(drop)                    \
+  X(nip)                     \
   X(dup)                     \
+  X(over)                    \
   X(swap)                    \
   X(rot)                     \
   X(ZSrot)                   \
+                             \
+  X(ZD)                      \
+  X(ZR)                      \
 
 #define f_DECL_STDLIB(name) \
   extern const f_Value f_PASTE(F,name)[];

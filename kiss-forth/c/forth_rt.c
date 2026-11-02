@@ -163,12 +163,26 @@ void f__ifnz(ST* st) {
 void f__ndrop(ST* st) {
   f_Value amt = POP(&st->d);
   st->d.cur -= amt;
-  if (amt < 0) { st->d.cur = -1; }
+  if (st->d.cur < 0) { st->d.cur = -1; }
   tailcall retPrim(st);
+}
+
+void f__rZ_ndrop(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  f_Value amt = POP(&st->d);
+  st->r.cur -= amt;
+  if (st->r.cur < 0) { st->r.cur = -1; }
+  tailcall f__step(st);
 }
 
 DEFUN(drop,
   IMM(1), DO(ndrop),
+)
+
+DEFUN(nip,
+  DO(swap), DO(drop),
 )
 
 void f__pick(ST* st) {
@@ -182,6 +196,22 @@ void f__pick(ST* st) {
 DEFUN(dup,
   IMM(1), DO(pick),
 )
+
+DEFUN(over,
+  IMM(2), DO(pick),
+)
+
+void f__rZ_pick(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  f_Value depth = POP(&st->d);
+  uintptr_t i = st->r.cur - (depth - 1);
+  // TODO bounds check
+  PUSH(&st->d, st->r.stack[i]);
+  tailcall f__step(st);
+}
+
 void f__plop(ST* st) {
   f_Value depth = POP(&st->d);
   f_Value value = POP(&st->d);
@@ -189,6 +219,18 @@ void f__plop(ST* st) {
   // TODO bounds check
   st->d.stack[i] = value;
   tailcall retPrim(st);
+}
+
+void f__rZ_plop(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  f_Value depth = POP(&st->d);
+  f_Value value = POP(&st->d);
+  uintptr_t i = st->r.cur - (depth - 1);
+  // TODO bounds check
+  st->r.stack[i] = value;
+  tailcall f__step(st);
 }
 
 void f__roll(ST* st) {
@@ -200,6 +242,7 @@ void f__roll(ST* st) {
     st->d.stack[i] = st->d.stack[i+1];
   }
   st->d.stack[st->d.cur] = oldBottom;
+  tailcall retPrim(st);
 }
 
 void f__ZSroll(ST* st) {
@@ -211,6 +254,7 @@ void f__ZSroll(ST* st) {
     st->d.stack[i] = st->d.stack[i-1];
   }
   st->d.stack[lowest] = oldTop;
+  tailcall retPrim(st);
 }
 
 DEFUN(swap,
@@ -225,6 +269,48 @@ DEFUN(ZSrot,
   IMM(3), DO(ZSroll),
 )
 
+void f__rZ_save(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  f_Value amt = POP(&st->d);
+  // TODO bounds check
+  st->d.cur -= amt;
+  for (int i = 1; i <= amt; i++) {
+    PUSH(&st->r, st->d.stack[st->d.cur + i]);
+  }
+  tailcall f__step(st);
+}
+
+void f__ZGr(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  PUSH(&st->r, POP(&st->d));
+  tailcall f__step(st);
+}
+
+void f__rZ_load(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  f_Value amt = POP(&st->d);
+  // TODO bounds check
+  st->r.cur -= amt;
+  for (int i = 1; i <= amt; i++) {
+    PUSH(&st->d, st->r.stack[st->r.cur + i]);
+  }
+  tailcall f__step(st);
+}
+
+void f__rZG(ST* st) {
+  st->ip = V2VP(POP(&st->r));
+  //^ since we're making changes to the return stack,
+  //  we need to fixup the return stack before doing the real operation
+  PUSH(&st->d, POP(&st->r));
+  tailcall f__step(st);
+}
+
 ////// ALU //////
 
 #define BINOP(operation) \
@@ -236,8 +322,21 @@ DEFUN(ZSrot,
 void f__ZA(ST* st) { BINOP(nos + tos); }
 void f__ZS(ST* st) { BINOP(nos - tos); }
 void f__ZM(ST* st) { BINOP(nos * tos); }
-void f__ZD(ST* st) { BINOP(nos / tos); }
-void f__ZR(ST* st) { BINOP(nos % tos); }
+
+void f__ZDZR(ST* st) {
+  f_Value tos = POP(&st->d);
+  f_Value nos = POP(&st->d);
+  PUSH(&st->d, nos % tos);
+  PUSH(&st->d, nos / tos);
+  tailcall retPrim(st);
+}
+
+DEFUN(ZD,
+  DO(ZDZR), DO(nip),
+)
+DEFUN(ZR,
+  DO(ZDZR), DO(drop),
+)
 
 ////// Tracing Helpers //////
 
